@@ -1326,7 +1326,7 @@ export default function App() {
       ========================================== */}
       <header className="sticky top-0 z-30 bg-zinc-950/90 backdrop-blur-md border-b border-zinc-800/80">
         <div className="max-w-[1600px] mx-auto px-4 py-2.5 space-y-2">
-          {/* ROW 1: MerchPulse Logo (Left) + My Spotify Button (Pinned Top Right) */}
+          {/* ROW 1: MerchPulse Logo (Left) + Connect to Spotify Button (Pinned Top Right) */}
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-950/50">
@@ -1351,7 +1351,7 @@ export default function App() {
                 className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/40 transition-colors cursor-pointer"
               >
                 <Music2 className="w-4 h-4 text-emerald-400" />
-                <span>My Spotify ({spotifyArtists.length})</span>
+                <span>Add/Update Playlist ({spotifyArtists.length})</span>
               </button>
             </div>
           </div>
@@ -2450,44 +2450,6 @@ export default function App() {
         </div>
       )}
 
-      {/* OPTION 1: ONE-CLICK LOGIN WITH SPOTIFY */}
-      <div className="space-y-2">
-        <button
-          onClick={startSpotifyLogin}
-          disabled={isSyncingSpotify}
-          className="w-full py-2.5 rounded-xl bg-[#1DB954] hover:bg-[#1ed760] disabled:opacity-40 text-zinc-950 font-bold text-xs transition-colors cursor-pointer flex items-center justify-center gap-2"
-        >
-          <Music2 className="w-4 h-4" />
-          <span>Login with Spotify</span>
-        </button>
-
-        {accessToken && (
-          <div className="flex gap-2">
-            <button
-              onClick={() => fetchSpotifyLibrary(accessToken)}
-              disabled={isSyncingSpotify}
-              className="flex-1 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-zinc-200 cursor-pointer"
-            >
-              Re-Sync Library ({spotifyArtists.length})
-            </button>
-            <button
-              onClick={handleLogoutSpotify}
-              className="px-3 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-xs font-semibold text-rose-300 cursor-pointer"
-            >
-              Disconnect
-            </button>
-          </div>
-        )}
-      </div>
-
-      <div className="relative flex py-1 items-center">
-        <div className="flex-grow border-t border-zinc-800" />
-        <span className="shrink mx-3 text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">
-          Or without logging in
-        </span>
-        <div className="flex-grow border-t border-zinc-800" />
-      </div>
-
       {/* OPTION 2: PASTE PUBLIC PLAYLIST URL */}
       <form onSubmit={importSpotifyPlaylist} className="space-y-2">
         <label className="text-[11px] font-semibold text-zinc-300 block">Paste a Public Spotify Playlist Link</label>
@@ -2516,7 +2478,7 @@ export default function App() {
           onClick={() => setShowCustomIdGuide((prev) => !prev)}
           className="w-full flex items-center justify-between text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer"
         >
-          <span>Login didn&apos;t work? Use your own Spotify Client ID</span>
+          <span>Or use your own Spotify Client ID (Advanced users)</span>
           <span className="text-emerald-400 font-semibold">{showCustomIdGuide ? 'Hide' : 'Show Guide'}</span>
         </button>
 
