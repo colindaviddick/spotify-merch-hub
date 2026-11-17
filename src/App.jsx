@@ -25,41 +25,7 @@ import {
 } from 'lucide-react';
 
 // ==========================================
-// 1. OAUTH 2.0 PKCE CRYPTO HELPERS
-// ==========================================
-function generateRandomString(length = 64) {
-  const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
-  const values = window.crypto.getRandomValues(new Uint8Array(length));
-  return Array.from(values)
-    .map((x) => possible[x % possible.length])
-    .join('');
-}
-
-async function sha256(plain) {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(plain);
-  return window.crypto.subtle.digest('SHA-256', data);
-}
-
-function base64urlencode(buffer) {
-  let str = '';
-  const bytes = new Uint8Array(buffer);
-  for (let i = 0; i < bytes.byteLength; i++) {
-    str += String.fromCharCode(bytes[i]);
-  }
-  return btoa(str)
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
-}
-
-async function generateCodeChallenge(verifier) {
-  const hashed = await sha256(verifier);
-  return base64urlencode(hashed);
-}
-
-// ==========================================
-// 2. DYNAMIC CDN THUMBNAIL RESIZER & LEAN NORMALIZER
+// 1. DYNAMIC CDN THUMBNAIL RESIZER & LEAN NORMALIZER
 // ==========================================
 function getSizedThumbnailUrl(rawUrl, thumbSize = 'medium') {
   if (!rawUrl || typeof rawUrl !== 'string') return null;
@@ -156,7 +122,7 @@ function interleaveProductsByPlatform(products = []) {
 }
 
 // ==========================================
-// 3. CONSTANTS & COLOR-CODED PLATFORM METADATA (ALL 15 PLATFORMS + AMAZON)
+// 2. CONSTANTS & COLOR-CODED PLATFORM METADATA (ALL 15 PLATFORMS + AMAZON)
 // ==========================================
 const SIZE_OPTIONS = ['ALL', 'XS', 'S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL', 'YOUTH'];
 
@@ -375,7 +341,7 @@ function matchProductSize(product, selectedSize, requireInStock) {
 }
 
 // ==========================================
-// 4. CLIENT-SIDE FALLBACK SCRAPER HELPERS
+// 3. CLIENT-SIDE FALLBACK SCRAPER HELPERS
 // ==========================================
 async function fetchHtmlViaCorsProxy(targetUrl, timeoutMs = 5000) {
   const fetchAttempt = async (proxyUrl) => {
@@ -483,40 +449,41 @@ function parseBandcampHtml(html, origin, artistName) {
   return products;
 }
 
+function deduplicateArtists(list = []) {
+  const seenIds = new Set();
+  const seenNames = new Set();
+  const clean = [];
+  for (const item of list) {
+    if (!item || !item.name) continue;
+    const normName = item.name.toLowerCase().trim();
+    const id = item.id || `pl-${normName}`;
+    if (seenIds.has(id) || seenNames.has(normName)) continue;
+    seenIds.add(id);
+    seenNames.add(normName);
+    clean.push({ ...item, id });
+  }
+  return clean;
+}
+
 // ==========================================
-// 5. MAIN APPLICATION COMPONENT
+// 4. MAIN APPLICATION COMPONENT
 // ==========================================
 export default function App() {
-  // --- Spotify Auth & Library State ---
-  const DEFAULT_CLIENT_ID = import.meta.env.VITE_SPOTIFY_CLIENT_ID || '';
-  
-  const [customClientId, setCustomClientId] = useState(() => localStorage.getItem('spotify_merch_client_id') || '');
-  const activeClientId = (customClientId.trim() || DEFAULT_CLIENT_ID).trim();
-  
-  const [playlistUrl, setPlaylistUrl] = useState('');
-  const [isImportingPlaylist, setIsImportingPlaylist] = useState(false);
-  const [showCustomIdGuide, setShowCustomIdGuide] = useState(false);
-  
-  const [redirectUri, setRedirectUri] = useState(
-    () => localStorage.getItem('spotify_merch_redirect_uri') || `${window.location.origin}/`
-  );
-  const [accessToken, setAccessToken] = useState(() => localStorage.getItem('spotify_merch_access_token') || '');
+  // --- Playlist Import & Artist State (Deduplicated) ---
   const [spotifyArtists, setSpotifyArtists] = useState(() => {
     try {
       const saved = localStorage.getItem('spotify_merch_cached_artists_v1');
-      return saved ? JSON.parse(saved) : [];
+      return saved ? deduplicateArtists(JSON.parse(saved)) : [];
     } catch {
       return [];
     }
   });
-  const [isSyncingSpotify, setIsSyncingSpotify] = useState(false);
-  const [spotifySyncProgress, setSpotifySyncProgress] = useState('');
-  const [spotifyError, setSpotifyError] = useState('');
-  const [showSpotifyModal, setShowSpotifyModal] = useState(false);
+  const [playlistUrl, setPlaylistUrl] = useState('');
+  const [loadedPlaylistName, setLoadedPlaylistName] = useState(() => localStorage.getItem('spotify_merch_playlist_name') || '');
+  const [isImportingPlaylist, setIsImportingPlaylist] = useState(false);
+  const [playlistError, setPlaylistError] = useState('');
 
-  // --- Discovery Scope & Filters ---
-  const [discoveryScope, setDiscoveryScope] = useState('ALL');
-  const [minLikedTracks, setMinLikedTracks] = useState(1);
+  // --- Filters & Pagination ---
   const [preferredRegion, setPreferredRegion] = useState(() => localStorage.getItem('spotify_merch_region') || 'UK');
   const [storeFilterMode, setStoreFilterMode] = useState('MATCHING_PRODUCTS');
   const [selectedPlatform, setSelectedPlatform] = useState('ALL');
@@ -572,7 +539,6 @@ export default function App() {
     }
   });
 
-  // Per-site URL overrides keyed by artist.id -> { OFFICIAL, BANDCAMP, AMAZON, EYESORE, MERCHBAR, ... }
   const [customSiteOverrides, setCustomSiteOverrides] = useState(() => {
     try {
       const raw = localStorage.getItem('spotify_merch_site_overrides_v1');
@@ -652,257 +618,47 @@ export default function App() {
   }, [customSiteOverrides]);
 
   // ==========================================
-  // 6. SPOTIFY OAUTH 2.0 PKCE LOGIN & SYNC
+  // 5. PUBLIC PLAYLIST URL IMPORTER ("FIND MERCH")
   // ==========================================
-  const startSpotifyLogin = async () => {
-    if (!activeClientId) {
-      setSpotifyError('No default Spotify Client ID configured. Use the custom Client ID option below or import a Playlist URL.');
-      setShowCustomIdGuide(true);
-      return;
-    }
-    try {
-      if (customClientId.trim()) {
-        localStorage.setItem('spotify_merch_client_id', customClientId.trim());
-      }
-      localStorage.setItem('spotify_merch_redirect_uri', redirectUri.trim());
-  
-      const verifier = generateRandomString(64);
-      const challenge = await generateCodeChallenge(verifier);
-      localStorage.setItem('spotify_merch_pkce_verifier', verifier);
-  
-      const scope = 'user-follow-read user-library-read';
-      const authUrl = new URL('https://accounts.spotify.com/authorize');
-      authUrl.searchParams.set('response_type', 'code');
-      authUrl.searchParams.set('client_id', activeClientId);
-      authUrl.searchParams.set('scope', scope);
-      authUrl.searchParams.set('code_challenge_method', 'S256');
-      authUrl.searchParams.set('code_challenge', challenge);
-      authUrl.searchParams.set('redirect_uri', redirectUri.trim());
-  
-      window.location.href = authUrl.toString();
-    } catch (err) {
-      setSpotifyError(`PKCE Setup Error: ${err.message}`);
-    }
-  };
-
-  const fetchSpotifyLibrary = useCallback(async (token) => {
-    if (!token) return;
-    setIsSyncingSpotify(true);
-    setSpotifyError('');
-    setSpotifySyncProgress('Fetching followed artists...');
-
-    try {
-      const artistMap = new Map();
-
-      let afterCursor = null;
-      let pageCount = 0;
-      while (pageCount < 30) {
-        pageCount++;
-        const url = new URL('https://api.spotify.com/v1/me/following');
-        url.searchParams.set('type', 'artist');
-        url.searchParams.set('limit', '50');
-        if (afterCursor) url.searchParams.set('after', afterCursor);
-
-        const res = await fetch(url.toString(), {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        if (res.status === 401) {
-          localStorage.removeItem('spotify_merch_access_token');
-          setAccessToken('');
-          throw new Error('Spotify session expired. Please reconnect in Spotify Setup.');
-        }
-		if (res.status === 403) {
-          localStorage.removeItem('spotify_merch_access_token');
-          setAccessToken('');
-          setShowCustomIdGuide(true);
-          setShowSpotifyModal(true);
-          throw new Error(
-            'Spotify Developer Mode limit (5 users max) blocked this login. Paste a public Playlist URL above, or follow the 30-second guide below to add your own Client ID.'
-          );
-        }
-        if (!res.ok) break;
-        const data = await res.json();
-        const items = data?.artists?.items || [];
-        for (const a of items) {
-          artistMap.set(a.id, {
-            id: a.id,
-            name: a.name,
-            image: a.images?.[1]?.url || a.images?.[0]?.url || null,
-            genres: a.genres || [],
-            spotifyUrl: a.external_urls?.spotify || `https://open.spotify.com/artist/${a.id}`,
-            followed: true,
-            likedTracksCount: 0
-          });
-        }
-        setSpotifySyncProgress(`Loaded ${artistMap.size} followed artists...`);
-        afterCursor = data?.artists?.cursors?.after;
-        if (!afterCursor || items.length === 0) break;
-      }
-
-      let offset = 0;
-      const missingIds = new Set();
-      const likedCounts = new Map();
-      const basicNames = new Map();
-
-      while (offset < 1000) {
-        setSpotifySyncProgress(`Scanning Liked Songs (${offset} tracks)...`);
-        const res = await fetch(`https://api.spotify.com/v1/me/tracks?limit=50&offset=${offset}`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        if (!res.ok) break;
-        const data = await res.json();
-        const items = data?.items || [];
-        if (items.length === 0) break;
-
-        for (const item of items) {
-          const trackArtists = item?.track?.artists || [];
-          for (const ta of trackArtists) {
-            if (!ta?.id) continue;
-            likedCounts.set(ta.id, (likedCounts.get(ta.id) || 0) + 1);
-            basicNames.set(ta.id, ta.name);
-            if (artistMap.has(ta.id)) {
-              const existing = artistMap.get(ta.id);
-              existing.likedTracksCount = likedCounts.get(ta.id);
-            } else {
-              missingIds.add(ta.id);
-            }
-          }
-        }
-        if (!data.next) break;
-        offset += 50;
-      }
-
-      const missingArray = Array.from(missingIds);
-      for (let i = 0; i < missingArray.length; i += 50) {
-        const batch = missingArray.slice(i, i + 50);
-        setSpotifySyncProgress(`Hydrating artist profiles (${i + batch.length}/${missingArray.length})...`);
-        try {
-          const res = await fetch(`https://api.spotify.com/v1/artists?ids=${batch.join(',')}`, {
-            headers: { Authorization: `Bearer ${token}` }
-          });
-          if (res.ok) {
-            const data = await res.json();
-            for (const a of data?.artists || []) {
-              if (!a) continue;
-              artistMap.set(a.id, {
-                id: a.id,
-                name: a.name,
-                image: a.images?.[1]?.url || a.images?.[0]?.url || null,
-                genres: a.genres || [],
-                spotifyUrl: a.external_urls?.spotify || `https://open.spotify.com/artist/${a.id}`,
-                followed: false,
-                likedTracksCount: likedCounts.get(a.id) || 1
-              });
-            }
-          }
-        } catch {}
-      }
-
-      for (const id of missingArray) {
-        if (!artistMap.has(id) && basicNames.get(id)) {
-          artistMap.set(id, {
-            id,
-            name: basicNames.get(id),
-            image: null,
-            genres: [],
-            spotifyUrl: `https://open.spotify.com/artist/${id}`,
-            followed: false,
-            likedTracksCount: likedCounts.get(id) || 1
-          });
-        }
-      }
-
-      const finalArtists = Array.from(artistMap.values()).sort((a, b) => a.name.localeCompare(b.name));
-      setSpotifyArtists(finalArtists);
-      localStorage.setItem('spotify_merch_cached_artists_v1', JSON.stringify(finalArtists));
-      setSpotifySyncProgress('');
-    } catch (err) {
-      setSpotifyError(err.message || 'Failed to sync Spotify library.');
-    } finally {
-      setIsSyncingSpotify(false);
-    }
-  }, []);
-
-  const importSpotifyPlaylist = async (e) => {
+  const handleFindMerchFromPlaylist = async (e) => {
     if (e) e.preventDefault();
-    if (!playlistUrl.trim()) return;
+    const trimmed = playlistUrl.trim();
+    if (!trimmed) return;
+
     setIsImportingPlaylist(true);
-    setSpotifyError('');
-  
+    setPlaylistError('');
+
     try {
       const apiUrl = new URL('/api/playlist', window.location.origin);
-      apiUrl.searchParams.set('url', playlistUrl.trim());
+      apiUrl.searchParams.set('url', trimmed);
       const res = await fetch(apiUrl.toString());
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Could not load playlist.');
-  
-      setSpotifyArtists(data.artists);
-      localStorage.setItem('spotify_merch_cached_artists_v1', JSON.stringify(data.artists));
-      setShowSpotifyModal(false);
+      if (!res.ok) {
+        throw new Error(data.error || 'Could not load playlist. Make sure the Spotify playlist is set to Public.');
+      }
+
+      const incomingArtists = deduplicateArtists(Array.isArray(data.artists) ? data.artists : []);
+      setSpotifyArtists(incomingArtists);
+      localStorage.setItem('spotify_merch_cached_artists_v1', JSON.stringify(incomingArtists));
+
+      const pName = data.playlistName || 'Spotify Playlist';
+      setLoadedPlaylistName(pName);
+      localStorage.setItem('spotify_merch_playlist_name', pName);
+
+      setSelectedBandId(null);
+      setSelectedGenre('ALL');
+      setStoreFilterMode('MATCHING_PRODUCTS');
+      setAutoScrapeEnabled(true);
       setPlaylistUrl('');
     } catch (err) {
-      setSpotifyError(err.message);
+      setPlaylistError(err.message || 'Failed to load playlist.');
     } finally {
       setIsImportingPlaylist(false);
     }
   };
 
-  const handleLogoutSpotify = () => {
-    localStorage.removeItem('spotify_merch_access_token');
-    setAccessToken('');
-  };
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const code = params.get('code');
-    if (!code) return;
-
-    const verifier = localStorage.getItem('spotify_merch_pkce_verifier');
-    const savedClientId = localStorage.getItem('spotify_merch_client_id') || activeClientId;
-    const savedRedirect = localStorage.getItem('spotify_merch_redirect_uri') || redirectUri;
-
-    window.history.replaceState({}, document.title, window.location.pathname);
-    if (!verifier || !savedClientId) return;
-
-    (async () => {
-      try {
-        setIsSyncingSpotify(true);
-        setSpotifySyncProgress('Completing Spotify PKCE handshake...');
-        const body = new URLSearchParams({
-          client_id: savedClientId,
-          grant_type: 'authorization_code',
-          code,
-          redirect_uri: savedRedirect,
-          code_verifier: verifier
-        });
-        const res = await fetch('https://accounts.spotify.com/api/token', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body
-        });
-        const data = await res.json();
-        if (!res.ok || !data.access_token) {
-          throw new Error(data.error_description || 'Token exchange failed');
-        }
-        localStorage.setItem('spotify_merch_access_token', data.access_token);
-        setAccessToken(data.access_token);
-        setShowSpotifyModal(false);
-        await fetchSpotifyLibrary(data.access_token);
-      } catch (err) {
-        setSpotifyError(err.message);
-        setIsSyncingSpotify(false);
-      }
-    })();
-  }, [activeClientId, redirectUri, fetchSpotifyLibrary]);
-
-  useEffect(() => {
-    if (accessToken && spotifyArtists.length === 0 && !isSyncingSpotify) {
-      fetchSpotifyLibrary(accessToken);
-    }
-  }, [accessToken, spotifyArtists.length, isSyncingSpotify, fetchSpotifyLibrary]);
-
   // ==========================================
-  // 7. MULTI-SITE MERCH DISCOVERY ENGINE
+  // 6. MULTI-SITE MERCH DISCOVERY ENGINE
   // ==========================================
   const discoverArtistMerch = useCallback(
     async (artist, manualOverrideUrl = null, forceBypassCache = false, explicitSiteOverrides = null) => {
@@ -933,18 +689,19 @@ export default function App() {
         if (res.ok) {
           proxyReachable = true;
           setProxyOnline(true);
-          const data = await res.json();
-          if (Array.isArray(data.products)) {
-            discoveredProducts = data.products.map(slimProductForStorage).filter(Boolean);
+          const payload = await res.json();
+          if (Array.isArray(payload.products)) {
+            discoveredProducts = payload.products.map(slimProductForStorage).filter(Boolean);
           }
           metaPatch = {
-            storeUrl: data.storeUrl || null,
-            officialWebsite: data.officialWebsite || null,
-            bandcampUrl: data.bandcampUrl || null,
-            regionalStores: data.regionalStores || {},
-            webPresence: data.webPresence || {},
-            genres: data.genres || [],
-            source: data.source || 'proxy'
+            storeUrl: payload.storeUrl || null,
+            officialWebsite: payload.officialWebsite || null,
+            bandcampUrl: payload.bandcampUrl || null,
+            artistImage: payload.artistImage || null,
+            regionalStores: payload.regionalStores || {},
+            webPresence: payload.webPresence || {},
+            genres: Array.isArray(payload.genres) ? payload.genres : [],
+            source: payload.source || 'proxy'
           };
         }
       } catch {
@@ -998,18 +755,31 @@ export default function App() {
             storeUrl: activeSiteOverrides.OFFICIAL || manualOverrideUrl || metaPatch.storeUrl || oldMeta.storeUrl || null,
             officialWebsite: activeSiteOverrides.WEBSITE || metaPatch.officialWebsite || oldMeta.officialWebsite || null,
             bandcampUrl: activeSiteOverrides.BANDCAMP || metaPatch.bandcampUrl || oldMeta.bandcampUrl || null,
+            artistImage: metaPatch.artistImage || oldMeta.artistImage || null,
             scanned: true,
             updatedAt: Date.now()
           }
         };
       });
 
-      if (Array.isArray(metaPatch.genres) && metaPatch.genres.length > 0) {
-        setSpotifyArtists((prev) =>
-          prev.map((a) =>
-            a.id === artist.id && (!a.genres || a.genres.length === 0) ? { ...a, genres: metaPatch.genres } : a
-          )
-        );
+      if ((Array.isArray(metaPatch.genres) && metaPatch.genres.length > 0) || metaPatch.artistImage) {
+        setSpotifyArtists((prev) => {
+          const updated = prev.map((a) => {
+            if (a.id !== artist.id) return a;
+            return {
+              ...a,
+              image: metaPatch.artistImage || a.image || null,
+              genres:
+                Array.isArray(metaPatch.genres) && metaPatch.genres.length > 0
+                  ? metaPatch.genres
+                  : a.genres || []
+            };
+          });
+          try {
+            localStorage.setItem('spotify_merch_cached_artists_v1', JSON.stringify(updated));
+          } catch {}
+          return updated;
+        });
       }
 
       setActivelyScanningIds((prev) => prev.filter((id) => id !== artist.id));
@@ -1018,22 +788,11 @@ export default function App() {
   );
 
   // ==========================================
-  // 8. FILTERING, PER-STORE COUNTS & STATS
+  // 7. FILTERING, PER-STORE COUNTS & GENRES
   // ==========================================
-  const scopedArtists = useMemo(() => {
-    return spotifyArtists.filter((artist) => {
-      if (discoveryScope === 'FOLLOWED' && !artist.followed) return false;
-      if (discoveryScope === 'LIKED' && (artist.likedTracksCount || 0) < minLikedTracks) return false;
-      if (discoveryScope === 'ALL' && !artist.followed && (artist.likedTracksCount || 0) < minLikedTracks) {
-        return false;
-      }
-      return true;
-    });
-  }, [spotifyArtists, discoveryScope, minLikedTracks]);
-
   const allGenres = useMemo(() => {
     const counts = new Map();
-    for (const a of scopedArtists) {
+    for (const a of spotifyArtists) {
       for (const g of a.genres || []) {
         const norm = g.toLowerCase().trim();
         if (norm) counts.set(norm, (counts.get(norm) || 0) + 1);
@@ -1041,9 +800,9 @@ export default function App() {
     }
     return Array.from(counts.entries())
       .sort((a, b) => b[1] - a[1])
-      .slice(0, 30)
+      .slice(0, 40)
       .map(([name, count]) => ({ name, count }));
-  }, [scopedArtists]);
+  }, [spotifyArtists]);
 
   const { artistStatsMap, globalPlatformCounts } = useMemo(() => {
     const map = new Map();
@@ -1052,7 +811,7 @@ export default function App() {
       if (p.id !== 'ALL') platTotals[p.id] = 0;
     }
 
-    for (const artist of scopedArtists) {
+    for (const artist of spotifyArtists) {
       const rawProducts = liveShopifyFeeds[artist.id] || [];
       const meta = discoveryMeta[artist.id] || {};
       const scanned = Boolean(meta.scanned);
@@ -1086,33 +845,29 @@ export default function App() {
     }
 
     return { artistStatsMap: map, globalPlatformCounts: platTotals };
-  }, [scopedArtists, liveShopifyFeeds, discoveryMeta, selectedPlatform, selectedProductType, selectedSize, inStockOnly]);
+  }, [spotifyArtists, liveShopifyFeeds, discoveryMeta, selectedPlatform, selectedProductType, selectedSize, inStockOnly]);
 
   const statusCounts = useMemo(() => {
     let withProducts = 0;
     let noMerch = 0;
-    let notScraped = 0;
     let totalMatchingItems = 0;
 
-    for (const artist of scopedArtists) {
+    for (const artist of spotifyArtists) {
       const st = artistStatsMap.get(artist.id);
       if (!st) continue;
       totalMatchingItems += st.matchingProductCount;
       if (st.matchingProductCount > 0) withProducts++;
       else if (st.scanned && st.totalProducts === 0) noMerch++;
-      else if (!st.scanned) notScraped++;
     }
     return {
       withProducts,
       noMerch,
-      notScraped,
-      allBands: scopedArtists.length,
       totalMatchingItems
     };
-  }, [scopedArtists, artistStatsMap]);
+  }, [spotifyArtists, artistStatsMap]);
 
   const filteredArtists = useMemo(() => {
-    return scopedArtists.filter((artist) => {
+    return spotifyArtists.filter((artist) => {
       if (selectedBandId === artist.id) return true;
 
       if (searchQuery.trim() && !artist.name.toLowerCase().includes(searchQuery.trim().toLowerCase())) {
@@ -1125,19 +880,13 @@ export default function App() {
       const st = artistStatsMap.get(artist.id);
       if (!st) return false;
 
-      if (storeFilterMode === 'MATCHING_PRODUCTS') {
-        return st.matchingProductCount > 0 || activelyScanningIds.includes(artist.id);
-      }
       if (storeFilterMode === 'NO_MERCH') {
         return st.scanned && st.totalProducts === 0;
       }
-      if (storeFilterMode === 'NOT_SCRAPED') {
-        return !st.scanned;
-      }
-      return true;
+      return st.matchingProductCount > 0 || activelyScanningIds.includes(artist.id);
     });
   }, [
-    scopedArtists,
+    spotifyArtists,
     selectedBandId,
     searchQuery,
     selectedGenre,
@@ -1148,7 +897,7 @@ export default function App() {
 
   const directoryArtists = useMemo(() => {
     const q = directorySearch.trim().toLowerCase();
-    const list = scopedArtists.filter((a) => !q || a.name.toLowerCase().includes(q));
+    const list = spotifyArtists.filter((a) => !q || a.name.toLowerCase().includes(q));
     return [...list].sort((a, b) => {
       if (sortActiveFirst) {
         const activeA = (artistStatsMap.get(a.id)?.matchingProductCount || 0) > 0;
@@ -1157,7 +906,7 @@ export default function App() {
       }
       return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
     });
-  }, [scopedArtists, directorySearch, sortActiveFirst, artistStatsMap]);
+  }, [spotifyArtists, directorySearch, sortActiveFirst, artistStatsMap]);
 
   const totalPages = Math.max(1, Math.ceil(filteredArtists.length / BANDS_PER_PAGE));
   useEffect(() => {
@@ -1170,11 +919,11 @@ export default function App() {
   }, [filteredArtists, currentPage]);
 
   // ==========================================
-  // 9. PARALLEL TURBO SCRAPER QUEUE
+  // 8. PARALLEL TURBO SCRAPER QUEUE
   // ==========================================
   const unscrapedQueue = useMemo(() => {
-    return scopedArtists.filter((a) => !discoveryMeta[a.id]?.scanned && !activelyScanningIds.includes(a.id));
-  }, [scopedArtists, discoveryMeta, activelyScanningIds]);
+    return spotifyArtists.filter((a) => !discoveryMeta[a.id]?.scanned && !activelyScanningIds.includes(a.id));
+  }, [spotifyArtists, discoveryMeta, activelyScanningIds]);
 
   useEffect(() => {
     if (!autoScrapeEnabled || unscrapedQueue.length === 0) return;
@@ -1196,7 +945,7 @@ export default function App() {
   }, [autoScrapeEnabled, unscrapedQueue, scraperConcurrency, discoverArtistMerch, customStoreUrls]);
 
   // ==========================================
-  // 10. BAND LINKS MODAL HANDLERS (ALL 15 PLATFORMS + REGIONAL STORES)
+  // 9. BAND LINKS MODAL HANDLERS (ALL 15 PLATFORMS + REGIONAL STORES)
   // ==========================================
   const openBandLinksModal = (artist) => {
     const meta = discoveryMeta[artist.id] || {};
@@ -1204,7 +953,6 @@ export default function App() {
     const savedOverrides = customSiteOverrides[artist.id] || {};
     const bandProducts = liveShopifyFeeds[artist.id] || [];
 
-    // Pre-fill any discovered base/product URLs per platform if not already overridden
     const inferredSiteUrls = {};
     for (const field of ALL_EDITABLE_SITE_FIELDS) {
       if (savedOverrides[field.key]) {
@@ -1288,8 +1036,8 @@ export default function App() {
     }
   }, [thumbnailSize]);
 
-  const scannedCount = scopedArtists.length - unscrapedQueue.length;
-  const progressPercent = scopedArtists.length > 0 ? Math.min(100, Math.round((scannedCount / scopedArtists.length) * 100)) : 0;
+  const scannedCount = spotifyArtists.length - unscrapedQueue.length;
+  const progressPercent = spotifyArtists.length > 0 ? Math.min(100, Math.round((scannedCount / spotifyArtists.length) * 100)) : 0;
   const activeScanningNames = activelyScanningIds
     .map((id) => spotifyArtists.find((a) => a.id === id)?.name)
     .filter(Boolean)
@@ -1322,13 +1070,13 @@ export default function App() {
       `}</style>
 
       {/* ==========================================
-          STICKY 2-ROW HEADER
+          STICKY 2-ROW HEADER (LOGO + PLAYLIST URL "FIND MERCH" BAR)
       ========================================== */}
       <header className="sticky top-0 z-30 bg-zinc-950/90 backdrop-blur-md border-b border-zinc-800/80">
         <div className="max-w-[1600px] mx-auto px-4 py-2.5 space-y-2">
-          {/* ROW 1: MerchPulse Logo (Left) + Connect to Spotify Button (Pinned Top Right) */}
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
+          {/* ROW 1: MerchPulse Logo (Left) + Inline Public Playlist URL Input & "Find Merch" Button (Right) */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3 shrink-0">
               <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-950/50">
                 <ShoppingBag className="w-5 h-5 text-zinc-950 stroke-[2.5]" />
               </div>
@@ -1339,22 +1087,63 @@ export default function App() {
                     15-Site Live Aggregator
                   </span>
                 </div>
-                <p className="text-xs text-zinc-400 hidden sm:block">
-                  Includes Amazon, Eyesore Shopify & Merchbar Algolia • Per-Band Store Toggles
+                <p className="text-xs text-zinc-400 hidden md:block">
+                  {loadedPlaylistName && spotifyArtists.length > 0
+                    ? `Loaded: ${loadedPlaylistName} (${spotifyArtists.length} bands)`
+                    : 'Paste any public Spotify playlist URL to scan 15+ official & indie merch stores'}
                 </p>
               </div>
             </div>
 
-            <div className="flex items-center gap-2.5">
+            {/* Inline Playlist URL Entry + "Find Merch" Button */}
+            <form onSubmit={handleFindMerchFromPlaylist} className="flex items-center gap-2 flex-1 max-w-xl min-w-[260px]">
+              <div className="relative flex-1">
+                <Music2 className="w-4 h-4 text-emerald-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="url"
+                  value={playlistUrl}
+                  onChange={(e) => setPlaylistUrl(e.target.value)}
+                  placeholder="Paste public Spotify playlist link (https://open.spotify.com/playlist/...)"
+                  className="w-full bg-zinc-900 border border-zinc-800 focus:border-emerald-500 rounded-xl pl-9 pr-7 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none"
+                />
+                {playlistUrl && (
+                  <button
+                    type="button"
+                    onClick={() => setPlaylistUrl('')}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
               <button
-                onClick={() => setShowSpotifyModal(true)}
-                className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/40 transition-colors cursor-pointer"
+                type="submit"
+                disabled={!playlistUrl.trim() || isImportingPlaylist}
+                className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-zinc-950 font-bold text-xs transition-colors cursor-pointer shrink-0 flex items-center gap-1.5 shadow-sm"
               >
-                <Music2 className="w-4 h-4 text-emerald-400" />
-                <span>Add/Update Playlist ({spotifyArtists.length})</span>
+                {isImportingPlaylist ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Loading...</span>
+                  </>
+                ) : (
+                  <>
+                    <Search className="w-3.5 h-3.5 stroke-[2.5]" />
+                    <span>Find Merch</span>
+                  </>
+                )}
+              </button>
+            </form>
+          </div>
+
+          {playlistError && (
+            <div className="px-3 py-1.5 rounded-xl bg-rose-500/15 border border-rose-500/40 text-xs text-rose-300 flex items-center justify-between gap-2">
+              <span>{playlistError}</span>
+              <button onClick={() => setPlaylistError('')} className="text-rose-200 hover:text-white cursor-pointer">
+                <X className="w-3.5 h-3.5" />
               </button>
             </div>
-          </div>
+          )}
 
           {/* ROW 2: Region Selector + Full-Width Fixed-Height Scraper Progress Bar */}
           <div className="flex items-center gap-3">
@@ -1381,20 +1170,22 @@ export default function App() {
                   className={`w-2 h-2 rounded-full shrink-0 ${
                     activelyScanningIds.length > 0
                       ? 'bg-emerald-400 animate-ping'
-                      : unscrapedQueue.length === 0 && scopedArtists.length > 0
+                      : unscrapedQueue.length === 0 && spotifyArtists.length > 0
                       ? 'bg-emerald-500'
                       : 'bg-amber-400'
                   }`}
                 />
                 <span className="text-xs font-semibold text-zinc-200 tabular-nums shrink-0">
-                  Scraped {scannedCount}/{scopedArtists.length}
+                  Scraped {scannedCount}/{spotifyArtists.length}
                 </span>
                 <span className="text-zinc-600 shrink-0">•</span>
                 <span className="text-xs text-zinc-400 truncate min-w-0 flex-1">
                   {activelyScanningIds.length > 0
                     ? `Scanning (${activelyScanningIds.length}x): ${activeScanningNames}`
-                    : unscrapedQueue.length === 0 && scopedArtists.length > 0
-                    ? `All ${scopedArtists.length} bands scanned (${statusCounts.totalMatchingItems} matching items)`
+                    : unscrapedQueue.length === 0 && spotifyArtists.length > 0
+                    ? `All ${spotifyArtists.length} bands scanned (${statusCounts.totalMatchingItems} matching items)`
+                    : spotifyArtists.length === 0
+                    ? 'Paste a public Spotify playlist link above to begin'
                     : 'Scraper paused'}
                 </span>
               </div>
@@ -1405,7 +1196,8 @@ export default function App() {
                 </span>
                 <button
                   onClick={() => setAutoScrapeEnabled((prev) => !prev)}
-                  className={`w-20 py-1 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 border transition-colors cursor-pointer ${
+                  disabled={spotifyArtists.length === 0}
+                  className={`w-20 py-1 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 border transition-colors cursor-pointer disabled:opacity-40 ${
                     autoScrapeEnabled
                       ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700'
                       : 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border-emerald-500/40'
@@ -1467,7 +1259,7 @@ export default function App() {
               )}
             </div>
 
-            {/* Band Feed Status 2x2 Grid */}
+            {/* Band Feed Status (With Products / No Merch Found) */}
             <div className="space-y-1.5">
               <label className="text-[11px] font-medium text-zinc-400">Band Feed Status</label>
               <div className="grid grid-cols-2 gap-1.5">
@@ -1496,34 +1288,6 @@ export default function App() {
                   <span>No Merch Found</span>
                   <span className="tabular-nums text-[11px] px-1.5 py-0.5 rounded bg-zinc-900 text-amber-400">
                     {statusCounts.noMerch}
-                  </span>
-                </button>
-
-                <button
-                  onClick={() => setStoreFilterMode('NOT_SCRAPED')}
-                  className={`px-2.5 py-2 rounded-xl text-xs font-semibold text-left border transition-all cursor-pointer flex items-center justify-between ${
-                    storeFilterMode === 'NOT_SCRAPED'
-                      ? 'bg-sky-500/20 text-sky-300 border-sky-500/50'
-                      : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
-                  }`}
-                >
-                  <span>Not Scraped</span>
-                  <span className="tabular-nums text-[11px] px-1.5 py-0.5 rounded bg-zinc-900 text-sky-400">
-                    {statusCounts.notScraped}
-                  </span>
-                </button>
-
-                <button
-                  onClick={() => setStoreFilterMode('ALL_BANDS')}
-                  className={`px-2.5 py-2 rounded-xl text-xs font-semibold text-left border transition-all cursor-pointer flex items-center justify-between ${
-                    storeFilterMode === 'ALL_BANDS'
-                      ? 'bg-zinc-800 text-white border-zinc-600'
-                      : 'bg-zinc-950/60 text-zinc-400 border-zinc-800 hover:text-zinc-200'
-                  }`}
-                >
-                  <span>All Bands</span>
-                  <span className="tabular-nums text-[11px] px-1.5 py-0.5 rounded bg-zinc-900 text-zinc-300">
-                    {statusCounts.allBands}
                   </span>
                 </button>
               </div>
@@ -1731,86 +1495,52 @@ export default function App() {
             </div>
           </div>
 
-          {/* 3. SPOTIFY DISCOVERY SCOPE & GENRES */}
-          <div className="bg-zinc-900/80 border border-zinc-800/90 rounded-2xl p-4 space-y-3.5">
-            <div className="flex items-center gap-2">
-              <Music2 className="w-4 h-4 text-emerald-400" />
-              <h2 className="text-xs font-bold uppercase tracking-wider text-zinc-200">Spotify Discovery Scope</h2>
+          {/* 3. FILTER BY GENRE */}
+          <div className="bg-zinc-900/80 border border-zinc-800/90 rounded-2xl p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Tag className="w-4 h-4 text-emerald-400" />
+                <h2 className="text-xs font-bold uppercase tracking-wider text-zinc-200">Filter by Genre</h2>
+              </div>
+              {selectedGenre !== 'ALL' && (
+                <button
+                  onClick={() => setSelectedGenre('ALL')}
+                  className="text-[10px] text-emerald-400 hover:underline cursor-pointer"
+                >
+                  Clear
+                </button>
+              )}
             </div>
 
-            <div className="grid grid-cols-3 gap-1 bg-zinc-950 p-1 rounded-xl border border-zinc-800">
-              {[
-                { id: 'ALL', label: 'All Sources' },
-                { id: 'FOLLOWED', label: 'Followed' },
-                { id: 'LIKED', label: 'Liked Songs' }
-              ].map((sc) => (
+            {allGenres.length === 0 ? (
+              <p className="text-[11px] text-zinc-500">
+                Genres will populate automatically as bands are scanned.
+              </p>
+            ) : (
+              <div className="max-h-40 overflow-y-auto flex flex-wrap gap-1 pr-1">
                 <button
-                  key={sc.id}
-                  onClick={() => setDiscoveryScope(sc.id)}
-                  className={`py-1.5 rounded-lg text-[11px] font-semibold transition-all cursor-pointer ${
-                    discoveryScope === sc.id ? 'bg-emerald-500 text-zinc-950' : 'text-zinc-400 hover:text-zinc-200'
+                  onClick={() => setSelectedGenre('ALL')}
+                  className={`px-2 py-0.5 rounded-md text-[10px] font-medium border cursor-pointer ${
+                    selectedGenre === 'ALL'
+                      ? 'bg-emerald-500 text-zinc-950 border-emerald-400 font-semibold'
+                      : 'bg-zinc-950 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                   }`}
                 >
-                  {sc.label}
+                  All Genres
                 </button>
-              ))}
-            </div>
-
-            {discoveryScope !== 'FOLLOWED' && (
-              <div className="space-y-1">
-                <div className="flex justify-between text-[11px]">
-                  <span className="text-zinc-400">Min. Liked Tracks</span>
-                  <span className="text-emerald-400 font-semibold">{minLikedTracks}+ tracks</span>
-                </div>
-                <input
-                  type="range"
-                  min={1}
-                  max={10}
-                  value={minLikedTracks}
-                  onChange={(e) => setMinLikedTracks(Number(e.target.value))}
-                  className="w-full accent-emerald-500 cursor-pointer"
-                />
-              </div>
-            )}
-
-            {allGenres.length > 0 && (
-              <div className="space-y-1.5 pt-1 border-t border-zinc-800/80">
-                <div className="flex items-center justify-between">
-                  <label className="text-[11px] font-medium text-zinc-400">Filter by Genre</label>
-                  {selectedGenre !== 'ALL' && (
-                    <button
-                      onClick={() => setSelectedGenre('ALL')}
-                      className="text-[10px] text-emerald-400 hover:underline"
-                    >
-                      Clear
-                    </button>
-                  )}
-                </div>
-                <div className="max-h-32 overflow-y-auto flex flex-wrap gap-1 pr-1">
+                {allGenres.map((g) => (
                   <button
-                    onClick={() => setSelectedGenre('ALL')}
-                    className={`px-2 py-0.5 rounded-md text-[10px] font-medium border cursor-pointer ${
-                      selectedGenre === 'ALL'
+                    key={g.name}
+                    onClick={() => setSelectedGenre(selectedGenre === g.name ? 'ALL' : g.name)}
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-medium border cursor-pointer capitalize ${
+                      selectedGenre === g.name
                         ? 'bg-emerald-500 text-zinc-950 border-emerald-400 font-semibold'
-                        : 'bg-zinc-950 text-zinc-400 border-zinc-800'
+                        : 'bg-zinc-950 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                     }`}
                   >
-                    All Genres
+                    {g.name} ({g.count})
                   </button>
-                  {allGenres.map((g) => (
-                    <button
-                      key={g.name}
-                      onClick={() => setSelectedGenre(g.name)}
-                      className={`px-2 py-0.5 rounded-md text-[10px] font-medium border cursor-pointer capitalize ${
-                        selectedGenre === g.name
-                          ? 'bg-emerald-500 text-zinc-950 border-emerald-400 font-semibold'
-                          : 'bg-zinc-950 text-zinc-400 border-zinc-800 hover:text-zinc-200'
-                      }`}
-                    >
-                      {g.name} ({g.count})
-                    </button>
-                  ))}
-                </div>
+                ))}
               </div>
             )}
           </div>
@@ -1857,7 +1587,8 @@ export default function App() {
                     discoverArtistMerch(band, customStoreUrls[band.id] || null, true);
                   }
                 }}
-                className="flex-1 py-2 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-zinc-200 border border-zinc-700 transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                disabled={paginatedArtists.length === 0}
+                className="flex-1 py-2 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-xs font-semibold text-zinc-200 border border-zinc-700 transition-colors cursor-pointer flex items-center justify-center gap-1.5"
               >
                 <RefreshCw className="w-3.5 h-3.5" /> Scrape Current Page
               </button>
@@ -1920,25 +1651,20 @@ export default function App() {
             </div>
           </div>
 
-          {/* Empty State if No Spotify Artists Connected */}
+          {/* Empty State if No Playlist Loaded Yet */}
           {spotifyArtists.length === 0 ? (
             <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-12 text-center space-y-4">
               <div className="w-14 h-14 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center mx-auto">
                 <Music2 className="w-7 h-7 text-emerald-400" />
               </div>
-              <div className="space-y-1 max-w-md mx-auto">
-                <h3 className="text-base font-bold text-white">Connect Your Spotify Library</h3>
+              <div className="space-y-1.5 max-w-md mx-auto">
+                <h3 className="text-base font-bold text-white">Paste a Spotify Playlist to Start</h3>
                 <p className="text-xs text-zinc-400">
-                  Click <strong className="text-emerald-300">My Spotify</strong> in the top-right corner to authorize via
-                  Spotify PKCE and automatically discover official stores and live merch across your followed and liked bands.
+                  Paste any public Spotify playlist URL into the bar at the top and click{' '}
+                  <strong className="text-emerald-300">Find Merch</strong> to automatically scan 15+ official and indie merch
+                  stores for every band on the playlist.
                 </p>
               </div>
-              <button
-                onClick={() => setShowSpotifyModal(true)}
-                className="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-xs transition-colors cursor-pointer"
-              >
-                Open Spotify Setup
-              </button>
             </div>
           ) : paginatedArtists.length === 0 ? (
             <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-10 text-center space-y-3">
@@ -1946,8 +1672,8 @@ export default function App() {
               <h3 className="text-sm font-bold text-white">No Bands Match Your Current Filter View</h3>
               <p className="text-xs text-zinc-400 max-w-md mx-auto">
                 {unscrapedQueue.length > 0
-                  ? `The background scraper is still scanning (${scannedCount}/${scopedArtists.length}). New bands will appear here automatically as products are found.`
-                  : 'Try switching the Band Feed Status in the left sidebar to "No Merch Found" or "All Bands", or relax your size/type filter.'}
+                  ? `The background scraper is still scanning (${scannedCount}/${spotifyArtists.length}). New bands will appear here automatically as products are found.`
+                  : 'Try switching the Band Feed Status in the left sidebar to "No Merch Found", or relax your genre, size, or product type filter.'}
               </p>
             </div>
           ) : (
@@ -1965,6 +1691,8 @@ export default function App() {
                 const officialSiteUrl =
                   customStoreUrls[artist.id] || meta.storeUrl || meta.officialWebsite || meta.bandcampUrl;
 
+                const bandPhoto = artist.image || meta.artistImage || null;
+
                 const activeBandSite = bandSiteFilters[artist.id] || 'ALL';
                 const availablePlatformsForBand = SOURCE_PLATFORMS.filter(
                   (p) => p.id !== 'ALL' && (st.perBandPlatformCounts?.[p.id] || 0) > 0
@@ -1981,21 +1709,36 @@ export default function App() {
                 return (
                   <article
                     key={artist.id}
-                    className="bg-zinc-900/75 border border-zinc-800/90 rounded-2xl overflow-hidden shadow-lg"
+                    className="relative bg-zinc-900/90 border border-zinc-800/90 rounded-2xl overflow-hidden shadow-xl"
                   >
+                    {/* Atmospheric Blurred & Darkened Artist Photo Backdrop */}
+                    {bandPhoto && (
+                      <div className="absolute inset-0 pointer-events-none overflow-hidden select-none">
+                        <img
+                          src={bandPhoto}
+                          alt=""
+                          aria-hidden="true"
+                          loading="lazy"
+                          decoding="async"
+                          className="w-full h-full object-cover object-center scale-125 blur-lg opacity-30 saturate-150"
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-b from-zinc-950/70 via-zinc-950/85 to-zinc-950/95" />
+                      </div>
+                    )}
+
                     {/* Tidied Band Card Header with Compact Inline Color-Coded Store Toggles */}
-                    <div className="px-4 py-3 bg-zinc-900/95 border-b border-zinc-800/80 flex flex-wrap items-center justify-between gap-3">
-                      <div className="flex items-center gap-3 min-w-0 flex-1">
-                        {artist.image ? (
+                    <div className="relative z-10 px-4 py-3.5 bg-zinc-950/45 backdrop-blur-md border-b border-white/10 flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-3.5 min-w-0 flex-1">
+                        {bandPhoto ? (
                           <img
-                            src={artist.image}
+                            src={bandPhoto}
                             alt={artist.name}
                             loading="lazy"
                             decoding="async"
-                            className="w-11 h-11 rounded-xl object-cover border border-zinc-700 shrink-0"
+                            className="w-12 h-12 rounded-xl object-cover border border-white/15 shadow-md shrink-0"
                           />
                         ) : (
-                          <div className="w-11 h-11 rounded-xl bg-zinc-800 flex items-center justify-center text-zinc-400 font-bold text-base shrink-0">
+                          <div className="w-12 h-12 rounded-xl bg-zinc-800/90 border border-zinc-700/80 flex items-center justify-center text-zinc-300 font-bold text-base shrink-0">
                             {artist.name[0]}
                           </div>
                         )}
@@ -2117,7 +1860,7 @@ export default function App() {
                     </div>
 
                     {/* Product Thumbnail Grid */}
-                    <div className="p-4 space-y-3">
+                    <div className="relative z-10 p-4 space-y-3">
                       {bandDisplayedProducts.length === 0 ? (
                         <div className="py-6 text-center text-xs text-zinc-500">
                           {isScanning
@@ -2263,7 +2006,7 @@ export default function App() {
       </main>
 
       {/* ==========================================
-          MODAL 1: BAND LINKS EDITOR (ALL 15 PLATFORMS + AMAZON + REGIONAL STORES)
+          MODAL: BAND LINKS EDITOR (ALL 15 PLATFORMS + AMAZON + REGIONAL STORES)
       ========================================== */}
       {editingArtist && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
@@ -2419,108 +2162,6 @@ export default function App() {
           </div>
         </div>
       )}
-
-      {/* ==========================================
-          MODAL 2: SPOTIFY OAUTH 2.0 PKCE SETUP
-      ========================================== */}
-      {showSpotifyModal && (
-  <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-    <div className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl">
-      <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
-        <div className="flex items-center gap-2">
-          <Music2 className="w-5 h-5 text-emerald-400" />
-          <h3 className="text-sm font-bold text-white">Load Artists from Spotify</h3>
-        </div>
-        <button onClick={() => setShowSpotifyModal(false)} className="text-zinc-400 hover:text-white p-1 rounded-lg">
-          <X className="w-4 h-4" />
-        </button>
-      </div>
-
-      {spotifyError && (
-        <div className="p-3 rounded-xl bg-amber-500/15 border border-amber-500/40 text-xs text-amber-200 space-y-1">
-          <p className="font-semibold text-amber-300">Notice</p>
-          <p>{spotifyError}</p>
-        </div>
-      )}
-
-      {isSyncingSpotify && (
-        <div className="p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-xs text-emerald-300 flex items-center gap-2">
-          <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
-          <span>{spotifySyncProgress || 'Syncing your Spotify library...'}</span>
-        </div>
-      )}
-
-      {/* OPTION 2: PASTE PUBLIC PLAYLIST URL */}
-      <form onSubmit={importSpotifyPlaylist} className="space-y-2">
-        <label className="text-[11px] font-semibold text-zinc-300 block">Paste a Public Spotify Playlist Link</label>
-        <div className="flex gap-2">
-          <input
-            type="url"
-            value={playlistUrl}
-            onChange={(e) => setPlaylistUrl(e.target.value)}
-            placeholder="https://open.spotify.com/playlist/..."
-            className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500"
-          />
-          <button
-            type="submit"
-            disabled={!playlistUrl.trim() || isImportingPlaylist}
-            className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-xs font-bold text-emerald-300 border border-zinc-700 cursor-pointer shrink-0"
-          >
-            {isImportingPlaylist ? 'Loading...' : 'Scan Playlist'}
-          </button>
-        </div>
-      </form>
-
-      {/* COLLAPSIBLE TROUBLESHOOTING / CUSTOM CLIENT ID GUIDE */}
-      <div className="pt-2 border-t border-zinc-800/80">
-        <button
-          type="button"
-          onClick={() => setShowCustomIdGuide((prev) => !prev)}
-          className="w-full flex items-center justify-between text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer"
-        >
-          <span>Or use your own Spotify Client ID (Advanced users)</span>
-          <span className="text-emerald-400 font-semibold">{showCustomIdGuide ? 'Hide' : 'Show Guide'}</span>
-        </button>
-
-        {showCustomIdGuide && (
-          <div className="mt-3 p-3 rounded-xl bg-zinc-950 border border-zinc-800 space-y-2.5 text-[11px] text-zinc-400">
-            <p className="text-zinc-300">
-              Spotify restricts public indie apps to <strong>5 test users</strong>. To bypass this limit with your own
-              account:
-            </p>
-            <ol className="list-decimal list-inside space-y-1 text-zinc-400">
-              <li>
-                Open{' '}
-                <a
-                  href="https://developer.spotify.com/dashboard"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-emerald-400 underline"
-                >
-                  developer.spotify.com/dashboard
-                </a>{' '}
-                and click <strong>Create App</strong>.
-              </li>
-              <li>
-                Set the Redirect URI to:{' '}
-                <code className="px-1.5 py-0.5 rounded bg-zinc-900 text-emerald-300 select-all">{redirectUri}</code>
-              </li>
-              <li>Copy your <strong>Client ID</strong>, paste it below, and click <strong>Login with Spotify</strong>.</li>
-            </ol>
-
-            <input
-              type="text"
-              value={customClientId}
-              onChange={(e) => setCustomClientId(e.target.value)}
-              placeholder="Optional: Paste your 32-character Client ID"
-              className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 focus:outline-none focus:border-emerald-500"
-            />
-          </div>
-        )}
-      </div>
-    </div>
-  </div>
-)}
     </div>
   );
 }

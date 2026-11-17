@@ -90,7 +90,6 @@ const saveCache = () => {
   }, 1000);
 };
 
-// Eyesore Merch UK migrated to Shopify — adding it here gives instant JSON collection & predictive search hits
 const SHOPIFY_DISTRO_HUBS = [
   { id: 'EVILGREED', name: 'Evil Greed', baseUrl: 'https://evilgreed.net' },
   { id: 'EYESORE', name: 'Eyesore Merch UK', baseUrl: 'https://eyesoremerch.com' },
@@ -135,10 +134,51 @@ async function fetchWithTimeout(url, options = {}, timeout = 5000) {
 }
 
 // ==========================================
+// LIGHTWEIGHT ARTIST PHOTO LOOKUP (~12-18 KB)
+// ==========================================
+async function lookupArtistPhoto(artistName) {
+  if (!artistName) return null;
+
+  // 1. Deezer public search API: request picture_medium (250x250, ~12-18 KB)
+  try {
+    const dzUrl = `https://api.deezer.com/search/artist?q=${encodeURIComponent(artistName)}&limit=3`;
+    const dzRes = await fetchWithTimeout(dzUrl, { headers: { Accept: 'application/json' } }, 3500);
+    if (dzRes.ok) {
+      const dzData = await dzRes.json();
+      const list = Array.isArray(dzData?.data) ? dzData.data : [];
+      const exact =
+        list.find((a) => String(a.name || '').toLowerCase() === artistName.toLowerCase()) || list[0];
+      const pic = exact?.picture_medium || exact?.picture;
+      if (pic && !pic.includes('/artist//')) {
+        return pic;
+      }
+    }
+  } catch {}
+
+  // 2. Fallback: Wikidata P18 image capped at 250px width (~15-25 KB)
+  try {
+    const sparql = `SELECT ?img WHERE { ?item rdfs:label "${artistName.replace(/"/g, '')}"@en; wdt:P18 ?img. } LIMIT 1`;
+    const wdUrl = `https://query.wikidata.org/sparql?query=${encodeURIComponent(sparql)}&format=json`;
+    const wdRes = await fetchWithTimeout(wdUrl, { headers: { Accept: 'application/sparql-results+json' } }, 3500);
+    if (wdRes.ok) {
+      const wdData = await wdRes.json();
+      const rawImg = wdData?.results?.bindings?.[0]?.img?.value;
+      if (rawImg) {
+        return rawImg.replace(/^http:\/\//i, 'https://') + '?width=250';
+      }
+    }
+  } catch {}
+
+  return null;
+}
+
+// ==========================================
 // DISCOVERY METHOD 1: Wikidata SPARQL Lookup by Exact Spotify Artist ID (P1902)
 // ==========================================
 async function lookupWikidataBySpotifyId(spotifyId) {
-  if (!spotifyId || spotifyId.startsWith('demo-')) return { officialWebsite: null, bandcampUrl: null };
+  if (!spotifyId || spotifyId.startsWith('demo-') || spotifyId.startsWith('pl-')) {
+    return { officialWebsite: null, bandcampUrl: null };
+  }
   try {
     const sparql = `SELECT ?website ?bandcamp WHERE { ?item wdt:P1902 "${spotifyId}". OPTIONAL { ?item wdt:P856 ?website. } OPTIONAL { ?item wdt:P3283 ?bandcamp. } } LIMIT 5`;
     const url = `https://query.wikidata.org/sparql?query=${encodeURIComponent(sparql)}&format=json`;
@@ -168,7 +208,7 @@ async function lookupMusicBrainz(artistName) {
       {
         headers: {
           Accept: 'application/json',
-          'User-Agent': 'MerchPulseLocal/4.0 (https://127.0.0.1:5173)'
+          'User-Agent': 'MerchPulseApp/5.0 (https://github.com/colindaviddick/spotify-merch-hub)'
         }
       },
       4500
@@ -189,7 +229,7 @@ async function lookupMusicBrainz(artistName) {
       {
         headers: {
           Accept: 'application/json',
-          'User-Agent': 'MerchPulseLocal/4.0 (https://127.0.0.1:5173)'
+          'User-Agent': 'MerchPulseApp/5.0 (https://github.com/colindaviddick/spotify-merch-hub)'
         }
       },
       4500
@@ -348,7 +388,6 @@ async function fetchShopifyDistroProducts(distro, artistName, customOverrideUrl 
   const artistLower = artistName.toLowerCase();
 
   try {
-    // 0. If user explicitly provided a collection/store URL override for this distro
     if (customOverrideUrl) {
       const cleanOverride = customOverrideUrl.replace(/\/+$/, '');
       const jsonTarget = cleanOverride.endsWith('.json') ? cleanOverride : `${cleanOverride}/products.json?limit=24`;
@@ -361,7 +400,6 @@ async function fetchShopifyDistroProducts(distro, artistName, customOverrideUrl 
       }
     }
 
-    // 1. Check /collections/<band-slug>/products.json (and -merch / -official variants)
     if (dashSlug.length > 1) {
       const slugCandidates = Array.from(new Set([dashSlug, `${dashSlug}-merch`, `${dashSlug}-official`]));
       for (const s of slugCandidates) {
@@ -376,7 +414,6 @@ async function fetchShopifyDistroProducts(distro, artistName, customOverrideUrl 
       }
     }
 
-    // 2. Check Shopify Predictive Search JSON (/search/suggest.json)
     const suggestUrl = `${distro.baseUrl}/search/suggest.json?q=${encodeURIComponent(
       artistName
     )}&resources[type]=product&resources[limit]=16`;
@@ -654,7 +691,6 @@ async function fetchMerchbarProducts(artistName, customUrl = null) {
     });
   };
 
-  // Strategy A: Query Merchbar's public Algolia product index directly (fast, structured JSON)
   try {
     const algoliaRes = await fetchWithTimeout(
       'https://latency-dsn.algolia.net/1/indexes/*/queries?x-algolia-application-id=2B1677333R&x-algolia-api-key=345d364d2b40310a5e8c26619d6d0f3a',
@@ -685,14 +721,12 @@ async function fetchMerchbarProducts(artistName, customUrl = null) {
     }
   } catch {}
 
-  // Strategy B: Scrape Merchbar search/artist page HTML (__NEXT_DATA__, Next.js RSC flight chunks, & product anchor cards)
   try {
     const targetUrl = customUrl || `https://www.merchbar.com/search?q=${encodeURIComponent(artistName)}`;
     const res = await fetchWithTimeout(targetUrl, {}, 4800);
     if (!res.ok) return [];
     const html = await res.text();
 
-    // 1) Try __NEXT_DATA__
     const nextMatch = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
     if (nextMatch) {
       try {
@@ -714,7 +748,6 @@ async function fetchMerchbarProducts(artistName, customUrl = null) {
       } catch {}
     }
 
-    // 2) Try Next.js App Router RSC flight payload & JSON-LD
     if (products.length === 0) {
       const ldMatches = html.match(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi) || [];
       for (const block of ldMatches) {
@@ -742,33 +775,6 @@ async function fetchMerchbarProducts(artistName, customUrl = null) {
         } catch {}
       }
     }
-
-    // 3) Fallback HTML product link + image extractor
-    if (products.length === 0) {
-      const cardRegex = /<a[^>]*href="(\/[^"]*(?:vinyl|shirt|hoodie|merch|cd|cassette|records)[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
-      let m;
-      let idx = 0;
-      while ((m = cardRegex.exec(html)) !== null && idx < 16) {
-        const href = m[1];
-        const inner = m[2];
-        const imgM = inner.match(/<img[^>]*src="([^"]+)"/i) || inner.match(/data-src="([^"]+)"/i);
-        const altM = inner.match(/alt="([^"]+)"/i);
-        const priceM = inner.match(/\$([0-9]+(?:\.[0-9]{2})?)/);
-        const title = (altM ? altM[1] : inner.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ')).trim();
-        if (title.length > 4) {
-          idx++;
-          pushMerchbarItem(
-            {
-              title,
-              url: href,
-              image_url: imgM ? imgM[1] : null,
-              price: priceM ? priceM[1] : '24.99'
-            },
-            idx
-          );
-        }
-      }
-    }
   } catch {}
 
   return products.slice(0, 16);
@@ -782,7 +788,6 @@ async function fetchEyesoreProducts(artistName, customUrl = null) {
   const shopifyResults = await fetchShopifyDistroProducts(eyesoreHub, artistName, customUrl);
   if (shopifyResults.length > 0) return shopifyResults;
 
-  // Fallback HTML parser for Eyesore Shopify collection/search pages
   try {
     const slug = artistName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     const searchUrl = customUrl || `https://eyesoremerch.com/search?type=product&q=${encodeURIComponent(artistName)}`;
@@ -1021,7 +1026,6 @@ async function fetchAmazonProducts(artistName, region = 'UK', customUrl = null) 
     if (!res.ok) return [];
     const html = await res.text();
 
-    // Parse Amazon search result blocks (data-component-type="s-search-result")
     const asinBlocks = html.split('data-component-type="s-search-result"').slice(1, 16);
     let idx = 0;
     for (const block of asinBlocks) {
@@ -1035,7 +1039,6 @@ async function fetchAmazonProducts(artistName, region = 'UK', customUrl = null) 
       const asin = asinMatch ? asinMatch[1] : null;
       const titleLower = rawTitle.toLowerCase();
 
-      // Ensure result genuinely mentions the band and is merch/music
       if (!titleLower.includes(artistLower)) continue;
       if (!/shirt|tee|hoodie|sweat|vinyl|lp|cd|merch|longsleeve|beanie|cap|patch|poster/i.test(titleLower)) continue;
 
@@ -1077,6 +1080,73 @@ async function fetchAmazonProducts(artistName, region = 'UK', customUrl = null) 
 }
 
 // ==========================================
+// PUBLIC PLAYLIST ARTIST EXTRACTOR (NO OAUTH NEEDED)
+// ==========================================
+app.get('/api/playlist', async (req, res) => {
+  const rawUrl = (req.query.url || '').trim();
+  const match = rawUrl.match(/playlist\/([a-zA-Z0-9]+)/);
+  if (!match) {
+    return res.status(400).json({ error: 'Invalid Spotify playlist URL. Paste a link like https://open.spotify.com/playlist/...' });
+  }
+
+  const playlistId = match[1];
+  try {
+    const embedUrl = `https://open.spotify.com/embed/playlist/${playlistId}`;
+    const pageRes = await fetchWithTimeout(embedUrl, {}, 6000);
+    if (!pageRes.ok) {
+      return res.status(404).json({ error: 'Playlist not found or is set to Private. Make sure it is Public.' });
+    }
+    const html = await pageRes.text();
+
+    const nextMatch = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
+    if (!nextMatch) {
+      return res.status(502).json({ error: 'Could not parse playlist tracks from Spotify.' });
+    }
+
+    const nextData = JSON.parse(nextMatch[1]);
+    const entity = nextData?.props?.pageProps?.state?.data?.entity || {};
+    const trackList = entity.trackList || [];
+    const playlistName = entity.name || 'Imported Playlist';
+
+    const artistMap = new Map();
+    for (const item of trackList) {
+      if (item.isRecommended || item.recommendation) continue;
+
+      const rawSubtitle = (item.subtitle || '').replace(/\u00A0/g, ' ');
+      const names = Array.isArray(item.artists)
+        ? item.artists.map((a) => a.name).filter(Boolean)
+        : rawSubtitle.split(/,\s+/).map((s) => s.trim()).filter(Boolean);
+
+      for (const name of names) {
+        const key = name.toLowerCase();
+        if (!artistMap.has(key)) {
+          artistMap.set(key, {
+            id: `pl-${Buffer.from(key).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 32)}`,
+            name,
+            image: null,
+            genres: [],
+            spotifyUrl: `https://open.spotify.com/search/${encodeURIComponent(name)}`,
+            followed: false,
+            likedTracksCount: 1
+          });
+        } else {
+          artistMap.get(key).likedTracksCount += 1;
+        }
+      }
+    }
+
+    const artists = Array.from(artistMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+    if (artists.length === 0) {
+      return res.status(404).json({ error: 'No artists found in that playlist. Ensure the playlist is public.' });
+    }
+
+    return res.json({ playlistName, artists });
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to load playlist: ${err.message}` });
+  }
+});
+
+// ==========================================
 // MAIN /api/discover ENDPOINT
 // ==========================================
 app.get('/api/discover', async (req, res) => {
@@ -1086,7 +1156,6 @@ app.get('/api/discover', async (req, res) => {
   const preferredRegion = (req.query.region || 'UK').toUpperCase();
   const forceRefresh = req.query.force === '1' || req.query.force === 'true';
 
-  // Parse per-site URL overrides if sent by the Edit Modal
   let siteOverrides = {};
   if (req.query.siteOverrides) {
     try {
@@ -1095,12 +1164,13 @@ app.get('/api/discover', async (req, res) => {
   }
 
   if (!artistName) return res.status(400).json({ error: 'Missing artist parameter' });
-  const cacheKey = `${artistName.toLowerCase()}::${preferredRegion}::v4`;
+  const cacheKey = `${artistName.toLowerCase()}::${preferredRegion}::v5`;
 
   if (customUrl && Object.keys(siteOverrides).length === 0) {
     const manualProbe = await probeShopifyFeed(customUrl, 'OFFICIAL');
     return res.json({
       artist: artistName,
+      artistImage: cache[cacheKey]?.artistImage || (await lookupArtistPhoto(artistName)),
       storeUrl: manualProbe?.storeUrl || customUrl,
       officialWebsite: cache[cacheKey]?.officialWebsite || customUrl,
       source: manualProbe ? 'manual-shopify' : 'manual-link',
@@ -1120,9 +1190,10 @@ app.get('/api/discover', async (req, res) => {
   }
 
   try {
-    const [wikidata, { urls, genres }] = await Promise.all([
+    const [wikidata, { urls, genres }, artistImage] = await Promise.all([
       lookupWikidataBySpotifyId(spotifyId),
-      lookupMusicBrainz(artistName)
+      lookupMusicBrainz(artistName),
+      lookupArtistPhoto(artistName)
     ]);
 
     let officialWebsite = siteOverrides.WEBSITE || wikidata.officialWebsite || null;
@@ -1198,8 +1269,6 @@ app.get('/api/discover', async (req, res) => {
     }
 
     const shopifyDomainList = Array.from(candidateShopifyDomains).slice(0, 6);
-
-    // Scrape all 15 platforms in parallel (excluding EYESORE from generic loop so dedicated fallback runs too)
     const distroHubsWithoutEyesore = SHOPIFY_DISTRO_HUBS.filter((d) => d.id !== 'EYESORE');
 
     const [
@@ -1257,6 +1326,7 @@ app.get('/api/discover', async (req, res) => {
 
     const payload = {
       artist: artistName,
+      artistImage,
       officialWebsite,
       regionalWebsites,
       regionalStores,
@@ -1278,73 +1348,8 @@ app.get('/api/discover', async (req, res) => {
 });
 
 // ==========================================
-// PUBLIC PLAYLIST ARTIST EXTRACTOR (NO OAUTH NEEDED)
+// PRODUCTION STATIC FRONTEND SERVER (EXPRESS 5 SAFE)
 // ==========================================
-app.get('/api/playlist', async (req, res) => {
-  const rawUrl = (req.query.url || '').trim();
-  const match = rawUrl.match(/playlist\/([a-zA-Z0-9]+)/);
-  if (!match) {
-    return res.status(400).json({ error: 'Invalid Spotify playlist URL. Paste a link like https://open.spotify.com/playlist/...' });
-  }
-
-  const playlistId = match[1];
-  try {
-    const embedUrl = `https://open.spotify.com/embed/playlist/${playlistId}`;
-    const pageRes = await fetchWithTimeout(embedUrl, {}, 6000);
-    if (!pageRes.ok) {
-      return res.status(404).json({ error: 'Playlist not found or is set to Private. Make sure it is Public.' });
-    }
-    const html = await pageRes.text();
-
-    // Extract Spotify's embedded __NEXT_DATA__ JSON payload
-    const nextMatch = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
-    if (!nextMatch) {
-      return res.status(502).json({ error: 'Could not parse playlist tracks from Spotify.' });
-    }
-
-    const nextData = JSON.parse(nextMatch[1]);
-    const entity = nextData?.props?.pageProps?.state?.data?.entity || {};
-    const trackList = entity.trackList || [];
-    const playlistName = entity.name || 'Imported Playlist';
-
-    const artistMap = new Map();
-    for (const item of trackList) {
-      // Spotify embed trackList stores artist names in subtitle or artists array
-      const rawSubtitle = item.subtitle || '';
-      const names = Array.isArray(item.artists)
-        ? item.artists.map((a) => a.name).filter(Boolean)
-        : rawSubtitle.split(/,\s*/).map((s) => s.trim()).filter(Boolean);
-
-      for (const name of names) {
-        const key = name.toLowerCase();
-        if (!artistMap.has(key)) {
-          artistMap.set(key, {
-            id: `pl-${Buffer.from(key).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 16)}`,
-            name,
-            image: null,
-            genres: [],
-            spotifyUrl: `https://open.spotify.com/search/${encodeURIComponent(name)}`,
-            followed: false,
-            likedTracksCount: 1
-          });
-        } else {
-          artistMap.get(key).likedTracksCount += 1;
-        }
-      }
-    }
-
-    const artists = Array.from(artistMap.values()).sort((a, b) => a.name.localeCompare(b.name));
-    if (artists.length === 0) {
-      return res.status(404).json({ error: 'No artists found in that playlist. Ensure the playlist is public.' });
-    }
-
-    return res.json({ playlistName, artists });
-  } catch (err) {
-    return res.status(500).json({ error: `Failed to load playlist: ${err.message}` });
-  }
-});
-
-// Serve the built React app when running in production (after `npm run build`)
 const distPath = path.join(__dirname, 'dist');
 if (fs.existsSync(distPath)) {
   app.use(express.static(distPath));
@@ -1354,5 +1359,5 @@ if (fs.existsSync(distPath)) {
 }
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`MerchPulse running on http://127.0.0.1:${PORT}`);
+  console.log(`MerchPulse 15-Site Aggregator running on port ${PORT}`);
 });
