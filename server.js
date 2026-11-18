@@ -14,67 +14,37 @@ const CACHE_FILE = path.resolve('./merch-cache.json');
 app.use(cors());
 app.use(express.json());
 
-// ==========================================
-// LEAN PRODUCT & THUMBNAIL URL OPTIMIZERS
-// ==========================================
-function optimizeThumbnailUrl(rawUrl, defaultWidth = 320) {
-  if (!rawUrl || typeof rawUrl !== 'string') return null;
-  const url = rawUrl.trim();
-  if (url.includes('cdn.shopify.com')) {
-    const cleanBase = url
-      .split('?')[0]
-      .replace(/_(\d+x\d*|small|compact|medium|large|grande|master|1024x1024|2048x2048)(?=\.(jpg|jpeg|png|webp|gif))/i, '');
-    return `${cleanBase}?width=${defaultWidth}&format=webp`;
-  }
-  if (url.includes('bcbits.com/img/')) {
-    return url.replace(/_(\d+)\.(jpg|jpeg|png|webp)$/i, '_4.$2');
-  }
-  if (url.includes('bigcartel.com')) {
-    return `${url.split('?')[0]}?w=${defaultWidth}&h=${defaultWidth}&fit=clip&auto=format,compress`;
-  }
-  return url;
+// Serve built Vite frontend in production (Render)
+const distPath = path.join(__dirname, 'dist');
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
 }
 
-function slimShopifyProduct(p, sourcePlatform = 'OFFICIAL', cleanUrl = '', vendorOverride = null) {
-  const rawImg = p.imageUrl || p.image?.src || p.images?.[0]?.src || (typeof p.image === 'string' ? p.image : null);
-  const handlePath = p.handle ? `${cleanUrl}/products/${p.handle}` : p.productUrl || cleanUrl;
-  return {
-    id: String(p.id || `${sourcePlatform.toLowerCase()}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`),
-    title: String(p.title || 'Merch Item').trim(),
-    product_type: String(p.product_type || p.type || ''),
-    vendor: String(vendorOverride || p.vendor || sourcePlatform),
-    sourcePlatform: p.sourcePlatform || sourcePlatform,
-    storeBaseUrl: p.storeBaseUrl || cleanUrl,
-    productUrl: p.productUrl || handlePath,
-    imageUrl: optimizeThumbnailUrl(rawImg),
-    tags: Array.isArray(p.tags)
-      ? p.tags.slice(0, 6)
-      : typeof p.tags === 'string'
-      ? p.tags.split(',').map((t) => t.trim()).slice(0, 6)
-      : [],
-    variants: (Array.isArray(p.variants) ? p.variants : []).slice(0, 14).map((v, i) => ({
-      id: String(v.id || `v-${i}`),
-      title: String(v.title || v.option1 || 'One Size'),
-      price: String(v.price || '25.00').replace(/[^0-9.]/g, '') || '25.00',
-      available: v.available !== false
-    }))
-  };
-}
+// ==========================================
+// 1. PERSISTENT CACHE & SHARED VERIFIED OVERRIDES
+// ==========================================
+let cache = {
+  bands: {},
+  verifiedOverrides: {},
+  firstSeenProducts: {}
+};
 
-let cache = {};
 if (fs.existsSync(CACHE_FILE)) {
   try {
-    const rawCache = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
-    for (const [k, entry] of Object.entries(rawCache)) {
-      if (entry && Array.isArray(entry.products)) {
-        entry.products = entry.products.map((p) =>
-          slimShopifyProduct(p, p.sourcePlatform || 'OFFICIAL', p.storeBaseUrl || entry.storeUrl || '', p.vendor)
-        );
+    const loaded = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
+    if (loaded && typeof loaded === 'object') {
+      if (!loaded.bands) {
+        cache.bands = loaded;
+      } else {
+        cache = {
+          bands: loaded.bands || {},
+          verifiedOverrides: loaded.verifiedOverrides || {},
+          firstSeenProducts: loaded.firstSeenProducts || {}
+        };
       }
-      cache[k] = entry;
     }
   } catch {
-    cache = {};
+    cache = { bands: {}, verifiedOverrides: {}, firstSeenProducts: {} };
   }
 }
 
@@ -83,22 +53,100 @@ const saveCache = () => {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     try {
-      fs.writeFileSync(CACHE_FILE, JSON.stringify(cache));
+      fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
     } catch (e) {
       console.error('Cache write error:', e.message);
     }
   }, 1000);
 };
 
+// ==========================================
+// 2. LIVE DAILY CURRENCY EXCHANGE RATES (USD BASE)
+// ==========================================
+let exchangeRates = {
+  USD: 1.0,
+  GBP: 0.79,
+  EUR: 0.92,
+  AUD: 1.52,
+  CAD: 1.38,
+  updatedAt: 0
+};
+
+async function refreshExchangeRates() {
+  if (Date.now() - exchangeRates.updatedAt < 12 * 3600000) return exchangeRates;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch('https://api.frankfurter.app/latest?from=USD&to=GBP,EUR,AUD,CAD', {
+      signal: controller.signal
+    });
+    clearTimeout(timer);
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.rates) {
+        exchangeRates = {
+          USD: 1.0,
+          GBP: data.rates.GBP || 0.79,
+          EUR: data.rates.EUR || 0.92,
+          AUD: data.rates.AUD || 1.52,
+          CAD: data.rates.CAD || 1.38,
+          updatedAt: Date.now()
+        };
+      }
+    }
+  } catch {}
+  return exchangeRates;
+}
+
+refreshExchangeRates();
+
+function inferSourceCurrency(platformId = '', storeUrl = '') {
+  const u = String(storeUrl || '').toLowerCase();
+  if (platformId === 'EYESORE' || u.includes('.co.uk') || u.includes('/uk')) return 'GBP';
+  if (platformId === 'EVILGREED' || platformId === 'IMPERICON' || platformId === 'KINGSROAD' || u.includes('.de') || u.includes('.eu')) return 'EUR';
+  if (platformId === 'TWENTYFOUR' || u.includes('.com.au') || u.includes('24hundred')) return 'AUD';
+  return 'USD';
+}
+
+function enrichProductsWithCurrencyAndDropMeta(products = [], artistName = '') {
+  const now = Date.now();
+  const SEVEN_DAYS_MS = 7 * 86400000;
+  let dirty = false;
+
+  const enriched = products.map((p) => {
+    const sourceCurrency = p.sourceCurrency || inferSourceCurrency(p.sourcePlatform, p.storeBaseUrl || p.productUrl);
+    const dropKey = `${artistName.toLowerCase()}::${p.sourcePlatform}::${String(p.title || '').toLowerCase().trim()}`;
+
+    let firstSeen = cache.firstSeenProducts[dropKey];
+    if (!firstSeen) {
+      firstSeen = now;
+      cache.firstSeenProducts[dropKey] = now;
+      dirty = true;
+    }
+
+    const isNewDrop = now - firstSeen < SEVEN_DAYS_MS;
+
+    return {
+      ...p,
+      sourceCurrency,
+      firstSeenAt: firstSeen,
+      isNewDrop
+    };
+  });
+
+  if (dirty) saveCache();
+  return enriched;
+}
+
 const SHOPIFY_DISTRO_HUBS = [
-  { id: 'EVILGREED', name: 'Evil Greed', baseUrl: 'https://evilgreed.net' },
-  { id: 'EYESORE', name: 'Eyesore Merch UK', baseUrl: 'https://eyesoremerch.com' },
-  { id: 'INDIEMERCH', name: 'IndieMerchstore', baseUrl: 'https://www.indiemerchstore.com' },
-  { id: 'HOLYMOUNTAIN', name: 'Holy Mountain Printing', baseUrl: 'https://holymountainprinting.com' },
-  { id: 'COLDCUTS', name: 'Cold Cuts Merch', baseUrl: 'https://www.coldcutsmerch.com' },
-  { id: 'HELLOMERCH', name: 'Hello Merch', baseUrl: 'https://www.hellomerch.com' },
-  { id: 'DOWNRIGHT', name: 'Down Right Merch', baseUrl: 'https://downrightmerch.com' },
-  { id: 'TWENTYFOUR', name: '24Hundred', baseUrl: 'https://24hundred.net' }
+  { id: 'EVILGREED', name: 'Evil Greed', baseUrl: 'https://evilgreed.net', currency: 'EUR' },
+  { id: 'EYESORE', name: 'Eyesore Merch UK', baseUrl: 'https://eyesoremerch.com', currency: 'GBP' },
+  { id: 'INDIEMERCH', name: 'IndieMerchstore', baseUrl: 'https://www.indiemerchstore.com', currency: 'USD' },
+  { id: 'HOLYMOUNTAIN', name: 'Holy Mountain Printing', baseUrl: 'https://holymountainprinting.com', currency: 'USD' },
+  { id: 'COLDCUTS', name: 'Cold Cuts Merch', baseUrl: 'https://www.coldcutsmerch.com', currency: 'USD' },
+  { id: 'HELLOMERCH', name: 'Hello Merch', baseUrl: 'https://www.hellomerch.com', currency: 'USD' },
+  { id: 'DOWNRIGHT', name: 'Down Right Merch', baseUrl: 'https://downrightmerch.com', currency: 'USD' },
+  { id: 'TWENTYFOUR', name: '24Hundred', baseUrl: 'https://24hundred.net', currency: 'AUD' }
 ];
 
 function detectRegion(url = '') {
@@ -110,7 +158,16 @@ function detectRegion(url = '') {
   return 'GLOBAL';
 }
 
-async function fetchWithTimeout(url, options = {}, timeout = 5000) {
+function isSafeHttpUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || '').trim());
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+async function fetchWithTimeout(url, options = {}, timeout = 4800) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
   try {
@@ -119,9 +176,8 @@ async function fetchWithTimeout(url, options = {}, timeout = 5000) {
       signal: controller.signal,
       headers: {
         'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
         Accept: 'text/html,application/json,*/*;q=0.8',
-        'Accept-Language': 'en-GB,en;q=0.9',
         ...(options.headers || {})
       }
     });
@@ -133,48 +189,21 @@ async function fetchWithTimeout(url, options = {}, timeout = 5000) {
   }
 }
 
-// ==========================================
-// LIGHTWEIGHT ARTIST PHOTO LOOKUP (~12-18 KB)
-// ==========================================
-async function lookupArtistPhoto(artistName) {
-  if (!artistName) return null;
-
-  // 1. Deezer public search API: request picture_medium (250x250, ~12-18 KB)
+async function fetchArtistPortraitImage(artistName) {
   try {
-    const dzUrl = `https://api.deezer.com/search/artist?q=${encodeURIComponent(artistName)}&limit=3`;
-    const dzRes = await fetchWithTimeout(dzUrl, { headers: { Accept: 'application/json' } }, 3500);
-    if (dzRes.ok) {
-      const dzData = await dzRes.json();
-      const list = Array.isArray(dzData?.data) ? dzData.data : [];
-      const exact =
-        list.find((a) => String(a.name || '').toLowerCase() === artistName.toLowerCase()) || list[0];
-      const pic = exact?.picture_medium || exact?.picture;
-      if (pic && !pic.includes('/artist//')) {
-        return pic;
-      }
-    }
-  } catch {}
-
-  // 2. Fallback: Wikidata P18 image capped at 250px width (~15-25 KB)
-  try {
-    const sparql = `SELECT ?img WHERE { ?item rdfs:label "${artistName.replace(/"/g, '')}"@en; wdt:P18 ?img. } LIMIT 1`;
-    const wdUrl = `https://query.wikidata.org/sparql?query=${encodeURIComponent(sparql)}&format=json`;
-    const wdRes = await fetchWithTimeout(wdUrl, { headers: { Accept: 'application/sparql-results+json' } }, 3500);
-    if (wdRes.ok) {
-      const wdData = await wdRes.json();
-      const rawImg = wdData?.results?.bindings?.[0]?.img?.value;
-      if (rawImg) {
-        return rawImg.replace(/^http:\/\//i, 'https://') + '?width=250';
-      }
-    }
-  } catch {}
-
-  return null;
+    const url = `https://api.deezer.com/search/artist?q=${encodeURIComponent(`"${artistName}"`)}&limit=3`;
+    const res = await fetchWithTimeout(url, { headers: { Accept: 'application/json' } }, 3500);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const list = Array.isArray(data?.data) ? data.data : [];
+    const exact =
+      list.find((a) => String(a.name || '').toLowerCase().trim() === artistName.toLowerCase().trim()) || list[0];
+    return exact?.picture_medium || exact?.picture_big || exact?.picture || null;
+  } catch {
+    return null;
+  }
 }
 
-// ==========================================
-// DISCOVERY METHOD 1: Wikidata SPARQL Lookup by Exact Spotify Artist ID (P1902)
-// ==========================================
 async function lookupWikidataBySpotifyId(spotifyId) {
   if (!spotifyId || spotifyId.startsWith('demo-') || spotifyId.startsWith('pl-')) {
     return { officialWebsite: null, bandcampUrl: null };
@@ -197,9 +226,6 @@ async function lookupWikidataBySpotifyId(spotifyId) {
   }
 }
 
-// ==========================================
-// DISCOVERY METHOD 2: MusicBrainz URL Relations & Genre Tags
-// ==========================================
 async function lookupMusicBrainz(artistName) {
   try {
     const searchUrl = `https://musicbrainz.org/ws/2/artist/?query=artist:${encodeURIComponent(`"${artistName}"`)}&fmt=json&limit=1`;
@@ -208,7 +234,7 @@ async function lookupMusicBrainz(artistName) {
       {
         headers: {
           Accept: 'application/json',
-          'User-Agent': 'MerchPulseApp/5.0 (https://github.com/colindaviddick/spotify-merch-hub)'
+          'User-Agent': 'MerchPulse/5.0 (https://merchpulse.onrender.com)'
         }
       },
       4500
@@ -229,7 +255,7 @@ async function lookupMusicBrainz(artistName) {
       {
         headers: {
           Accept: 'application/json',
-          'User-Agent': 'MerchPulseApp/5.0 (https://github.com/colindaviddick/spotify-merch-hub)'
+          'User-Agent': 'MerchPulse/5.0 (https://merchpulse.onrender.com)'
         }
       },
       4500
@@ -247,9 +273,6 @@ async function lookupMusicBrainz(artistName) {
   }
 }
 
-// ==========================================
-// DISCOVERY METHOD 3: Crawl Official Homepage & Linktree HTML for Store Links
-// ==========================================
 async function crawlWebsiteAndLinktreeForStores(websiteUrl) {
   const discovered = { storeUrls: [], bandcampUrl: null, bigcartelUrl: null };
   if (!websiteUrl) return discovered;
@@ -321,9 +344,6 @@ async function crawlWebsiteAndLinktreeForStores(websiteUrl) {
   return discovered;
 }
 
-// ==========================================
-// DISCOVERY METHOD 4: DuckDuckGo Lite Search Resolver
-// ==========================================
 async function searchDuckDuckGoForStores(artistName) {
   const result = { storeUrls: [], bandcampUrl: null, bigcartelUrl: null };
   try {
@@ -362,61 +382,68 @@ async function searchDuckDuckGoForStores(artistName) {
   return result;
 }
 
-// ==========================================
-// STORE SCRAPER 1: Official Shopify Store Probe (/products.json)
-// ==========================================
 async function probeShopifyFeed(baseUrl, sourcePlatform = 'OFFICIAL', vendorOverride = null) {
-  if (!baseUrl) return null;
+  if (!baseUrl || !isSafeHttpUrl(baseUrl)) return null;
   try {
-    const cleanUrl = baseUrl.replace(/\/+$/, '');
-    const res = await fetchWithTimeout(`${cleanUrl}/products.json?limit=24`, { headers: { Accept: 'application/json' } }, 3600);
+    const parsed = new URL(baseUrl);
+    const cleanOrigin = parsed.origin;
+    const pathPart = parsed.pathname.replace(/\/+$/, '');
+    const feedEndpoint = pathPart.includes('/collections/')
+      ? `${cleanOrigin}${pathPart}/products.json?limit=24`
+      : `${cleanOrigin}/products.json?limit=24`;
+
+    const res = await fetchWithTimeout(feedEndpoint, { headers: { Accept: 'application/json' } }, 3800);
     if (!res.ok) return null;
     const data = await res.json();
     if (data && Array.isArray(data.products) && data.products.length > 0) {
-      const tagged = data.products.map((p) => slimShopifyProduct(p, sourcePlatform, cleanUrl, vendorOverride));
-      return { storeUrl: cleanUrl, products: tagged };
+      const sourceCurrency = inferSourceCurrency(sourcePlatform, cleanOrigin);
+      const tagged = data.products.map((p) => ({
+        ...p,
+        description: p.body_html || '',
+        vendor: vendorOverride || p.vendor,
+        sourcePlatform,
+        sourceCurrency,
+        storeBaseUrl: cleanOrigin,
+        productUrl: `${cleanOrigin}/products/${p.handle}`
+      }));
+      return { storeUrl: baseUrl.replace(/\/+$/, ''), products: tagged };
     }
   } catch {}
   return null;
 }
 
-// ==========================================
-// STORE SCRAPER 2: Multi-Band Shopify Distro Hubs (Includes Eyesore Merch UK)
-// ==========================================
-async function fetchShopifyDistroProducts(distro, artistName, customOverrideUrl = null) {
+async function fetchShopifyDistroProducts(distro, artistName, overrideUrl = null) {
   const dashSlug = artistName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   const artistLower = artistName.toLowerCase();
 
   try {
-    if (customOverrideUrl) {
-      const cleanOverride = customOverrideUrl.replace(/\/+$/, '');
-      const jsonTarget = cleanOverride.endsWith('.json') ? cleanOverride : `${cleanOverride}/products.json?limit=24`;
-      const ovRes = await fetchWithTimeout(jsonTarget, { headers: { Accept: 'application/json' } }, 4200);
-      if (ovRes.ok) {
-        const ovData = await ovRes.json();
-        if (Array.isArray(ovData?.products) && ovData.products.length > 0) {
-          return ovData.products.map((p) => slimShopifyProduct(p, distro.id, distro.baseUrl, distro.name));
-        }
-      }
+    if (overrideUrl && isSafeHttpUrl(overrideUrl)) {
+      const probed = await probeShopifyFeed(overrideUrl, distro.id, distro.name);
+      if (probed && probed.products.length > 0) return probed.products;
     }
 
-    if (dashSlug.length > 1) {
-      const slugCandidates = Array.from(new Set([dashSlug, `${dashSlug}-merch`, `${dashSlug}-official`]));
-      for (const s of slugCandidates) {
-        const colUrl = `${distro.baseUrl}/collections/${s}/products.json?limit=20`;
-        const colRes = await fetchWithTimeout(colUrl, { headers: { Accept: 'application/json' } }, 3800);
-        if (colRes.ok) {
-          const colData = await colRes.json();
-          if (Array.isArray(colData?.products) && colData.products.length > 0) {
-            return colData.products.map((p) => slimShopifyProduct(p, distro.id, distro.baseUrl, distro.name));
-          }
+    if (dashSlug.length > 2) {
+      const colUrl = `${distro.baseUrl}/collections/${dashSlug}/products.json?limit=18`;
+      const colRes = await fetchWithTimeout(colUrl, { headers: { Accept: 'application/json' } }, 4000);
+      if (colRes.ok) {
+        const colData = await colRes.json();
+        if (Array.isArray(colData?.products) && colData.products.length > 0) {
+          return colData.products.map((p) => ({
+            ...p,
+            description: p.body_html || '',
+            vendor: distro.name,
+            sourcePlatform: distro.id,
+            sourceCurrency: distro.currency || 'USD',
+            storeBaseUrl: distro.baseUrl,
+            productUrl: `${distro.baseUrl}/products/${p.handle}`
+          }));
         }
       }
     }
 
     const suggestUrl = `${distro.baseUrl}/search/suggest.json?q=${encodeURIComponent(
       artistName
-    )}&resources[type]=product&resources[limit]=16`;
+    )}&resources[type]=product&resources[limit]=14`;
     const sugRes = await fetchWithTimeout(suggestUrl, { headers: { Accept: 'application/json' } }, 4000);
     if (sugRes.ok) {
       const sugData = await sugRes.json();
@@ -425,20 +452,20 @@ async function fetchShopifyDistroProducts(distro, artistName, customOverrideUrl 
         .filter(
           (p) =>
             String(p.title || '').toLowerCase().includes(artistLower) ||
-            String(p.vendor || '').toLowerCase().includes(artistLower) ||
-            String(p.handle || '').toLowerCase().includes(dashSlug)
+            String(p.vendor || '').toLowerCase().includes(artistLower)
         )
         .map((p, idx) => ({
-          id: `${distro.id.toLowerCase()}-${p.id || idx}`,
+          id: `${distro.id.toLowerCase()}-${p.id || idx}-${Date.now()}`,
           title: p.title,
           product_type:
             p.type ||
             (/hoodie|sweat/i.test(p.title) ? 'Hoodie' : /vinyl|lp|12"/i.test(p.title) ? 'Vinyl' : 'T-Shirt'),
           vendor: distro.name,
           sourcePlatform: distro.id,
+          sourceCurrency: distro.currency || 'USD',
           storeBaseUrl: distro.baseUrl,
           productUrl: p.url ? `${distro.baseUrl}${p.url.split('?')[0]}` : distro.baseUrl,
-          imageUrl: optimizeThumbnailUrl(p.image || p.featured_image?.url || null),
+          imageUrl: p.image || p.featured_image?.url || null,
           tags: [distro.id.toLowerCase(), p.type || 'merch'],
           variants: ['S', 'M', 'L', 'XL', '2XL'].map((sz, i) => ({
             id: `${distro.id.toLowerCase()}-v-${idx}-${i}`,
@@ -453,34 +480,34 @@ async function fetchShopifyDistroProducts(distro, artistName, customOverrideUrl 
   return [];
 }
 
-// ==========================================
-// STORE SCRAPER 3: BigCartel Public JSON API
-// ==========================================
 async function fetchBigCartelProducts(candidateOrigins = [], artistName = '') {
-  const uniqueOrigins = Array.from(new Set(candidateOrigins.filter(Boolean))).slice(0, 4);
+  const uniqueOrigins = Array.from(new Set(candidateOrigins.filter(isSafeHttpUrl))).slice(0, 4);
   const results = await Promise.all(
     uniqueOrigins.map(async (origin) => {
       try {
-        const cleanOrigin = origin.replace(/\/+$/, '');
+        const cleanOrigin = new URL(origin).origin;
         const res = await fetchWithTimeout(`${cleanOrigin}/products.json`, { headers: { Accept: 'application/json' } }, 3600);
         if (!res.ok) return null;
         const data = await res.json();
         if (Array.isArray(data) && data.length > 0) {
           return data.slice(0, 20).map((item, idx) => {
             const productUrl = item.url ? (item.url.startsWith('http') ? item.url : `${cleanOrigin}${item.url}`) : cleanOrigin;
-            const imageUrl = optimizeThumbnailUrl(item.images?.[0]?.url || null);
+            const imageUrl = item.images?.[0]?.url || null;
             const options = Array.isArray(item.options) && item.options.length > 0 ? item.options : [];
             return {
               id: `bigc-${item.id || idx}`,
               title: item.name || `${artistName} Merch`,
+              description: item.description || '',
               product_type:
                 item.categories?.[0]?.name ||
                 (/hoodie|sweat/i.test(item.name) ? 'Hoodie' : /vinyl|lp|cd/i.test(item.name) ? 'Vinyl' : 'T-Shirt'),
               vendor: `${artistName} BigCartel`,
               sourcePlatform: 'BIGCARTEL',
+              sourceCurrency: 'USD',
               storeBaseUrl: cleanOrigin,
               productUrl,
               imageUrl,
+              images: item.images || [],
               tags: ['bigcartel'],
               variants:
                 options.length > 0
@@ -509,17 +536,14 @@ async function fetchBigCartelProducts(candidateOrigins = [], artistName = '') {
   return results.find((r) => Array.isArray(r) && r.length > 0) || [];
 }
 
-// ==========================================
-// STORE SCRAPER 4: Bandcamp /merch Live Scraper
-// ==========================================
 async function fetchBandcampProducts(bandcampMerchUrl, artistName, officialWebsiteUrl = null) {
   const slug = artistName.toLowerCase().replace(/[^a-z0-9]/g, '');
   const candidateUrls = new Set();
 
-  if (bandcampMerchUrl) {
+  if (bandcampMerchUrl && isSafeHttpUrl(bandcampMerchUrl)) {
     candidateUrls.add(bandcampMerchUrl.replace(/\/+$/, '') + (bandcampMerchUrl.endsWith('/merch') ? '' : '/merch'));
   }
-  if (officialWebsiteUrl) {
+  if (officialWebsiteUrl && isSafeHttpUrl(officialWebsiteUrl)) {
     try {
       const hostSlug = new URL(officialWebsiteUrl).hostname.replace(/^www\./, '').split('.')[0];
       if (hostSlug && hostSlug.length > 2) candidateUrls.add(`https://${hostSlug}.bandcamp.com/merch`);
@@ -579,6 +603,15 @@ async function fetchBandcampProducts(bandcampMerchUrl, artistName, officialWebsi
             block.match(/(?:€|\$|£)\s*([0-9]+(?:\.[0-9]{2})?)/i);
           const soldOut = /sold\s*out/i.test(block);
 
+          const rawPriceBlock = priceMatch ? priceMatch[0] : '';
+          const detectedCurrency = rawPriceBlock.includes('£')
+            ? 'GBP'
+            : rawPriceBlock.includes('€')
+            ? 'EUR'
+            : rawPriceBlock.includes('A$')
+            ? 'AUD'
+            : 'USD';
+
           if (titleMatch) {
             idx++;
             const rawTitle = titleMatch[1]
@@ -594,14 +627,15 @@ async function fetchBandcampProducts(bandcampMerchUrl, artistName, officialWebsi
             const isApparel = /shirt|tee|hoodie|sweat|longsleeve|jacket|apparel/i.test(`${rawTitle} ${rawType}`);
 
             products.push({
-              id: `bc-${idx}-${slug}`,
+              id: `bc-${idx}-${Date.now()}`,
               title: rawTitle,
               product_type: rawType || (isApparel ? 'T-Shirt' : 'Vinyl'),
               vendor: `${artistName} Bandcamp`,
               sourcePlatform: 'BANDCAMP',
+              sourceCurrency: detectedCurrency,
               storeBaseUrl: origin,
               productUrl,
-              imageUrl: optimizeThumbnailUrl(imgMatch ? imgMatch[1] : null),
+              imageUrl: imgMatch ? imgMatch[1] : null,
               tags: [rawType, 'bandcamp'],
               variants: isApparel
                 ? ['S', 'M', 'L', 'XL', '2XL'].map((sz, i) => ({
@@ -623,206 +657,121 @@ async function fetchBandcampProducts(bandcampMerchUrl, artistName, officialWebsi
   return probeResults.find(Boolean) || { bandcampUrl: bandcampMerchUrl, products: [] };
 }
 
-// ==========================================
-// STORE SCRAPER 5: Merchbar Live Scraper (Algolia API + RSC / __NEXT_DATA__ Fallback)
-// ==========================================
-async function fetchMerchbarProducts(artistName, customUrl = null) {
-  const artistLower = artistName.toLowerCase();
-  const dashSlug = artistLower.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  const products = [];
-  const seen = new Set();
-
-  const pushMerchbarItem = (item, idx) => {
-    const title = String(item.title || item.name || item.product_title || '').trim();
-    if (!title || title.length < 3 || seen.has(title)) return;
-    const brand = String(item.brand || item.artist_name || item.artist || item.vendor || '').toLowerCase();
-    const rawUrl = String(item.url || item.href || item.slug || item.product_url || '');
-    const matchesArtist =
-      title.toLowerCase().includes(artistLower) ||
-      brand.includes(artistLower) ||
-      (dashSlug.length > 2 && rawUrl.toLowerCase().includes(dashSlug));
-    if (!matchesArtist) return;
-
-    seen.add(title);
-    const img =
-      item.image_url ||
-      item.imageUrl ||
-      item.img ||
-      (typeof item.image === 'string' ? item.image : item.image?.url) ||
-      null;
-    const rawPrice = item.price || item.sale_price || item.retail_price || item.min_price || '24.99';
-    const price =
-      String(typeof rawPrice === 'number' && rawPrice > 200 ? (rawPrice / 100).toFixed(2) : rawPrice).replace(
-        /[^0-9.]/g,
-        ''
-      ) || '24.99';
-    const productUrl = rawUrl
-      ? rawUrl.startsWith('http')
-        ? rawUrl
-        : `https://www.merchbar.com/${rawUrl.replace(/^\/+/, '')}`
-      : `https://www.merchbar.com/search?q=${encodeURIComponent(artistName)}`;
-    const isApparel = /shirt|tee|hoodie|sweat|longsleeve|jacket/i.test(title);
-    const isWaitlist = Boolean(item.waitlist || item.out_of_stock || item.sold_out === true || item.in_stock === false);
-
-    products.push({
-      id: `mb-${idx}-${dashSlug}`,
-      title: title.toLowerCase().includes(artistLower) ? title : `${artistName} - ${title}`,
-      product_type: /hoodie|sweat/i.test(title)
-        ? 'Hoodie'
-        : /vinyl|lp|cd|record|cassette/i.test(title)
-        ? 'Vinyl'
-        : /hat|cap|beanie|patch|pin|poster/i.test(title)
-        ? 'Accessories'
-        : 'T-Shirt',
-      vendor: 'Merchbar',
-      sourcePlatform: 'MERCHBAR',
-      storeBaseUrl: 'https://www.merchbar.com',
-      productUrl,
-      imageUrl: optimizeThumbnailUrl(img),
-      tags: ['merchbar'],
-      variants: isApparel
-        ? ['S', 'M', 'L', 'XL', '2XL'].map((sz, i) => ({
-            id: `mb-v-${idx}-${i}`,
-            title: sz,
-            price,
-            available: !isWaitlist
-          }))
-        : [{ id: `mb-v-${idx}-os`, title: 'One Size', price, available: !isWaitlist }]
-    });
-  };
-
+async function fetchMerchbarProducts(artistName, overrideUrl = null) {
   try {
-    const algoliaRes = await fetchWithTimeout(
-      'https://latency-dsn.algolia.net/1/indexes/*/queries?x-algolia-application-id=2B1677333R&x-algolia-api-key=345d364d2b40310a5e8c26619d6d0f3a',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          Referer: 'https://www.merchbar.com/',
-          Origin: 'https://www.merchbar.com'
-        },
-        body: JSON.stringify({
-          requests: [
-            {
-              indexName: 'merchbar_products_production',
-              params: `query=${encodeURIComponent(artistName)}&hitsPerPage=18`
-            }
-          ]
-        })
-      },
-      4500
-    );
-    if (algoliaRes.ok) {
-      const algData = await algoliaRes.json();
-      const hits = algData?.results?.[0]?.hits || [];
-      hits.forEach((h, i) => pushMerchbarItem(h, i + 1));
-      if (products.length > 0) return products.slice(0, 16);
-    }
-  } catch {}
-
-  try {
-    const targetUrl = customUrl || `https://www.merchbar.com/search?q=${encodeURIComponent(artistName)}`;
-    const res = await fetchWithTimeout(targetUrl, {}, 4800);
+    const searchUrl =
+      overrideUrl && isSafeHttpUrl(overrideUrl)
+        ? overrideUrl
+        : `https://www.merchbar.com/search?q=${encodeURIComponent(artistName)}`;
+    const res = await fetchWithTimeout(searchUrl, {}, 4800);
     if (!res.ok) return [];
     const html = await res.text();
+    const products = [];
+    const artistLower = artistName.toLowerCase();
+    let idx = 0;
 
     const nextMatch = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
     if (nextMatch) {
       try {
         const nextJson = JSON.parse(nextMatch[1]);
-        let idx = 0;
+        const seen = new Set();
         const walk = (node) => {
           if (!node || typeof node !== 'object' || idx >= 16) return;
           if (Array.isArray(node)) {
             for (const c of node) walk(c);
             return;
           }
-          if ((node.title || node.name) && (node.image_url || node.imageUrl || node.image)) {
-            idx++;
-            pushMerchbarItem(node, idx);
+          const title = node.title || node.name;
+          const img = node.image_url || node.imageUrl || (typeof node.image === 'string' ? node.image : node.image?.url);
+          const slugOrUrl = node.url || node.href || node.slug;
+          if (title && typeof title === 'string' && img && typeof img === 'string' && title.length > 3) {
+            const cleanTitle = title.trim();
+            if (!seen.has(cleanTitle)) {
+              seen.add(cleanTitle);
+              idx++;
+              const rawPrice = node.price || node.sale_price || node.retail_price || '24.99';
+              const price =
+                String(typeof rawPrice === 'number' && rawPrice > 200 ? (rawPrice / 100).toFixed(2) : rawPrice).replace(
+                  /[^0-9.]/g,
+                  ''
+                ) || '24.99';
+              const productUrl = slugOrUrl
+                ? String(slugOrUrl).startsWith('http')
+                  ? slugOrUrl
+                  : `https://www.merchbar.com/${String(slugOrUrl).replace(/^\/+/, '')}`
+                : searchUrl;
+              const isApparel = /shirt|tee|hoodie|sweat|longsleeve/i.test(cleanTitle);
+              const isWaitlist = Boolean(node.waitlist || node.out_of_stock || node.sold_out === true);
+              products.push({
+                id: `mb-${idx}-${Date.now()}`,
+                title: cleanTitle.toLowerCase().includes(artistLower) ? cleanTitle : `${artistName} - ${cleanTitle}`,
+                product_type: /hoodie|sweat/i.test(cleanTitle)
+                  ? 'Hoodie'
+                  : /vinyl|lp|cd|record/i.test(cleanTitle)
+                  ? 'Vinyl'
+                  : 'T-Shirt',
+                vendor: 'Merchbar',
+                sourcePlatform: 'MERCHBAR',
+                sourceCurrency: 'USD',
+                storeBaseUrl: searchUrl,
+                productUrl,
+                imageUrl: img,
+                tags: ['merchbar', cleanTitle],
+                variants: isApparel
+                  ? ['S', 'M', 'L', 'XL', '2XL'].map((sz, i) => ({
+                      id: `mb-v-${idx}-${i}`,
+                      title: sz,
+                      price,
+                      available: !isWaitlist
+                    }))
+                  : [{ id: `mb-v-${idx}-os`, title: 'One Size', price, available: !isWaitlist }]
+              });
+            }
           }
           for (const k of Object.keys(node)) walk(node[k]);
         };
         walk(nextJson);
       } catch {}
     }
-
-    if (products.length === 0) {
-      const ldMatches = html.match(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi) || [];
-      for (const block of ldMatches) {
-        try {
-          const parsed = JSON.parse(block.replace(/<\/?script[^>]*>/gi, '').trim());
-          const items = Array.isArray(parsed)
-            ? parsed
-            : parsed?.itemListElement
-            ? parsed.itemListElement.map((e) => e.item || e)
-            : [parsed];
-          items.forEach((it, i) => {
-            if (it?.name) {
-              pushMerchbarItem(
-                {
-                  title: it.name,
-                  brand: it.brand?.name || it.brand || artistName,
-                  image_url: Array.isArray(it.image) ? it.image[0] : it.image,
-                  url: it.url,
-                  price: it.offers?.price || it.offers?.[0]?.price
-                },
-                i + 1
-              );
-            }
-          });
-        } catch {}
-      }
-    }
-  } catch {}
-
-  return products.slice(0, 16);
+    return products;
+  } catch {
+    return [];
+  }
 }
 
-// ==========================================
-// STORE SCRAPER 6: Eyesore Merch UK Live Scraper (Shopify + HTML Fallback)
-// ==========================================
-async function fetchEyesoreProducts(artistName, customUrl = null) {
-  const eyesoreHub = { id: 'EYESORE', name: 'Eyesore Merch UK', baseUrl: 'https://eyesoremerch.com' };
-  const shopifyResults = await fetchShopifyDistroProducts(eyesoreHub, artistName, customUrl);
-  if (shopifyResults.length > 0) return shopifyResults;
-
+async function fetchEyesoreProducts(artistName, overrideUrl = null) {
   try {
-    const slug = artistName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    const searchUrl = customUrl || `https://eyesoremerch.com/search?type=product&q=${encodeURIComponent(artistName)}`;
+    const searchUrl =
+      overrideUrl && isSafeHttpUrl(overrideUrl)
+        ? overrideUrl
+        : `https://eyesoremerch.com/catalogsearch/result/?q=${encodeURIComponent(artistName)}`;
     const res = await fetchWithTimeout(searchUrl, {}, 4500);
     if (!res.ok) return [];
     const html = await res.text();
     const products = [];
     const artistLower = artistName.toLowerCase();
 
-    const linkRegex = /<a[^>]*href="(\/products\/[^"?#]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-    const seenUrls = new Set();
-    let m;
+    const itemRegex = /<li[^>]*class="[^"]*product-item[^"]*"[^>]*>([\s\S]*?)<\/li>/gi;
+    let match;
     let idx = 0;
-    while ((m = linkRegex.exec(html)) !== null && idx < 16) {
-      const pathUrl = m[1];
-      const fullUrl = `https://eyesoremerch.com${pathUrl}`;
-      if (seenUrls.has(fullUrl)) continue;
-      const block = m[2];
-      const altMatch = block.match(/alt="([^"]+)"/i);
-      const textTitle = block.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-      const rawTitle = (altMatch ? altMatch[1] : textTitle).trim();
-      if (!rawTitle || rawTitle.length < 4) continue;
-      if (!rawTitle.toLowerCase().includes(artistLower) && !pathUrl.toLowerCase().includes(slug)) continue;
+    while ((match = itemRegex.exec(html)) !== null && idx < 14) {
+      const block = match[1];
+      const linkMatch = block.match(/<a[^>]*class="[^"]*product-item-link[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+      if (!linkMatch) continue;
+      const productUrl = linkMatch[1].trim();
+      const rawTitle = linkMatch[2].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+      if (!overrideUrl && !rawTitle.toLowerCase().includes(artistLower)) continue;
 
-      seenUrls.add(fullUrl);
-      const imgMatch = block.match(/src="([^"]+)"/i) || block.match(/data-src="([^"]+)"/i);
-      let imgUrl = imgMatch ? imgMatch[1] : null;
-      if (imgUrl && imgUrl.startsWith('//')) imgUrl = `https:${imgUrl}`;
-      const priceMatch = block.match(/£([0-9]+\.[0-9]{2})/);
-      const priceNum = priceMatch ? priceMatch[1] : '21.99';
+      const imgMatch =
+        block.match(/<img[^>]*class="[^"]*product-image-photo[^"]*"[^>]*src="([^"]+)"/i) ||
+        block.match(/data-src="([^"]+)"/i);
+      const priceMatch = block.match(/data-price-amount="([0-9.]+)"/i) || block.match(/£([0-9]+\.[0-9]{2})/);
+      const priceNum = priceMatch ? priceMatch[1] : '24.99';
       const isApparel = /shirt|tee|hoodie|sweat|longsleeve|pullover|zip/i.test(rawTitle);
 
       idx++;
       products.push({
-        id: `eye-${idx}-${slug}`,
+        id: `eye-${idx}-${Date.now()}`,
         title: rawTitle,
         product_type: /hoodie|sweat/i.test(rawTitle)
           ? 'Hoodie'
@@ -833,10 +782,11 @@ async function fetchEyesoreProducts(artistName, customUrl = null) {
           : 'T-Shirt',
         vendor: 'Eyesore Merch UK',
         sourcePlatform: 'EYESORE',
-        storeBaseUrl: 'https://eyesoremerch.com',
-        productUrl: fullUrl,
-        imageUrl: optimizeThumbnailUrl(imgUrl),
-        tags: ['eyesore'],
+        sourceCurrency: 'GBP',
+        storeBaseUrl: overrideUrl || 'https://eyesoremerch.com',
+        productUrl,
+        imageUrl: imgMatch ? imgMatch[1] : null,
+        tags: ['eyesore', rawTitle],
         variants: isApparel
           ? ['S', 'M', 'L', 'XL', '2XL'].map((sz, i) => ({
               id: `eye-v-${idx}-${i}`,
@@ -853,23 +803,21 @@ async function fetchEyesoreProducts(artistName, customUrl = null) {
   }
 }
 
-// ==========================================
-// STORE SCRAPER 7: Impericon UK / EU Live Scraper
-// ==========================================
-async function fetchImpericonProducts(artistName, region = 'UK', customUrl = null) {
+async function fetchImpericonProducts(artistName, region = 'UK', overrideUrl = null) {
   try {
     const slug = artistName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     const localePath = region === 'EU' ? 'de' : 'uk';
-    const urlsToTry = customUrl
-      ? [{ url: customUrl, isDedicatedArtistPage: true }]
-      : [
-          { url: `https://www.impericon.com/${localePath}/${slug}.html`, isDedicatedArtistPage: true },
-          { url: `https://www.impericon.com/${localePath}/search?q=${encodeURIComponent(artistName)}`, isDedicatedArtistPage: false }
-        ];
+    const urlsToTry =
+      overrideUrl && isSafeHttpUrl(overrideUrl)
+        ? [overrideUrl]
+        : [
+            `https://www.impericon.com/${localePath}/${slug}.html`,
+            `https://www.impericon.com/${localePath}/search?q=${encodeURIComponent(artistName)}`
+          ];
     const artistLower = artistName.toLowerCase();
 
     const probeResults = await Promise.all(
-      urlsToTry.map(async ({ url, isDedicatedArtistPage }) => {
+      urlsToTry.map(async (url) => {
         try {
           const res = await fetchWithTimeout(url, {}, 4500);
           if (!res.ok) return null;
@@ -888,47 +836,44 @@ async function fetchImpericonProducts(artistName, region = 'UK', customUrl = nul
                 ? parsed.itemListElement.map((e) => e.item || e)
                 : [parsed];
               for (const item of items) {
-                if (item && (item['@type'] === 'Product' || item.name)) {
-                  const rawName = String(item.name || '').trim();
-                  const brandStr = String(item.brand?.name || item.brand || '').toLowerCase();
-                  const matchesBand =
-                    isDedicatedArtistPage ||
-                    rawName.toLowerCase().includes(artistLower) ||
-                    brandStr.includes(artistLower);
-
-                  if (rawName && matchesBand) {
-                    idx++;
-                    const title = rawName.toLowerCase().includes(artistLower) ? rawName : `${artistName} - ${rawName}`;
-                    const price = String(item.offers?.price || item.offers?.[0]?.price || '29.99');
-                    const imageUrl = Array.isArray(item.image) ? item.image[0] : item.image || null;
-                    const productUrl = item.url || url;
-                    const isApparel = /shirt|tee|hoodie|sweat|longsleeve|tank/i.test(title);
-                    products.push({
-                      id: `imp-${idx}-${slug}`,
-                      title,
-                      product_type: /hoodie|sweat/i.test(title)
-                        ? 'Hoodie'
-                        : /longsleeve|long sleeve/i.test(title)
-                        ? 'Longsleeve'
-                        : /vinyl|lp|cd/i.test(title)
-                        ? 'Vinyl'
-                        : 'T-Shirt',
-                      vendor: `Impericon ${region}`,
-                      sourcePlatform: 'IMPERICON',
-                      storeBaseUrl: 'https://www.impericon.com',
-                      productUrl,
-                      imageUrl: optimizeThumbnailUrl(imageUrl),
-                      tags: ['impericon'],
-                      variants: isApparel
-                        ? ['S', 'M', 'L', 'XL', '2XL'].map((sz, i) => ({
-                            id: `imp-v-${idx}-${i}`,
-                            title: sz,
-                            price,
-                            available: true
-                          }))
-                        : [{ id: `imp-v-${idx}-os`, title: 'One Size', price, available: true }]
-                    });
-                  }
+                if (
+                  item &&
+                  (item['@type'] === 'Product' || item.name) &&
+                  (overrideUrl || url.includes(`/${slug}.html`) || String(item.name).toLowerCase().includes(artistLower))
+                ) {
+                  idx++;
+                  const title = item.name;
+                  const price = String(item.offers?.price || item.offers?.[0]?.price || '29.99');
+                  const currency = item.offers?.priceCurrency || (region === 'EU' ? 'EUR' : 'GBP');
+                  const imageUrl = Array.isArray(item.image) ? item.image[0] : item.image || null;
+                  const productUrl = item.url || url;
+                  const isApparel = /shirt|tee|hoodie|sweat|longsleeve|tank/i.test(title);
+                  products.push({
+                    id: `imp-${idx}-${Date.now()}`,
+                    title,
+                    product_type: /hoodie|sweat/i.test(title)
+                      ? 'Hoodie'
+                      : /longsleeve|long sleeve/i.test(title)
+                      ? 'Longsleeve'
+                      : /vinyl|lp|cd/i.test(title)
+                      ? 'Vinyl'
+                      : 'T-Shirt',
+                    vendor: `Impericon ${region}`,
+                    sourcePlatform: 'IMPERICON',
+                    sourceCurrency: currency,
+                    storeBaseUrl: url,
+                    productUrl,
+                    imageUrl,
+                    tags: ['impericon', title],
+                    variants: isApparel
+                      ? ['S', 'M', 'L', 'XL', '2XL'].map((sz, i) => ({
+                          id: `imp-v-${idx}-${i}`,
+                          title: sz,
+                          price,
+                          available: true
+                        }))
+                      : [{ id: `imp-v-${idx}-os`, title: 'One Size', price, available: true }]
+                  });
                 }
               }
             } catch {}
@@ -945,17 +890,14 @@ async function fetchImpericonProducts(artistName, region = 'UK', customUrl = nul
   }
 }
 
-// ==========================================
-// STORE SCRAPER 8: Kings Road Merch Scraper
-// ==========================================
-async function fetchKingsRoadAndBleepProducts(artistName, region = 'UK', customUrl = null) {
+async function fetchKingsRoadAndBleepProducts(artistName, region = 'UK', overrideUrl = null) {
   const results = [];
   const slug = artistName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   const artistLower = artistName.toLowerCase();
 
   try {
     const krBase = region === 'US' ? 'https://kingsroadmerch.com' : 'https://eu.kingsroadmerch.com';
-    const krUrl = customUrl || `${krBase}/${slug}`;
+    const krUrl = overrideUrl && isSafeHttpUrl(overrideUrl) ? overrideUrl : `${krBase}/${slug}`;
     const res = await fetchWithTimeout(krUrl, {}, 4000);
     if (res.ok) {
       const html = await res.text();
@@ -966,17 +908,18 @@ async function fetchKingsRoadAndBleepProducts(artistName, region = 'UK', customU
         const href = m[1];
         const img = m[2];
         const title = m[3].trim();
-        if (title.length > 3 && (title.toLowerCase().includes(artistLower) || href.includes(slug))) {
+        if (title.length > 3 && (overrideUrl || title.toLowerCase().includes(artistLower) || href.includes(slug))) {
           idx++;
           results.push({
-            id: `kr-${idx}-${slug}`,
+            id: `kr-${idx}-${Date.now()}`,
             title: title.toLowerCase().includes(artistLower) ? title : `${artistName} - ${title}`,
             product_type: /hoodie|sweat/i.test(title) ? 'Hoodie' : /vinyl|lp|cd/i.test(title) ? 'Vinyl' : 'T-Shirt',
             vendor: 'Kings Road Merch',
             sourcePlatform: 'KINGSROAD',
-            storeBaseUrl: krBase,
+            sourceCurrency: region === 'US' ? 'USD' : 'EUR',
+            storeBaseUrl: krUrl,
             productUrl: href.startsWith('http') ? href : `${krBase}${href}`,
-            imageUrl: optimizeThumbnailUrl(img.startsWith('http') ? img : `${krBase}${img}`),
+            imageUrl: img.startsWith('http') ? img : `${krBase}${img}`,
             tags: ['kingsroad'],
             variants: ['S', 'M', 'L', 'XL', '2XL'].map((sz, i) => ({
               id: `kr-v-${idx}-${i}`,
@@ -993,95 +936,11 @@ async function fetchKingsRoadAndBleepProducts(artistName, region = 'UK', customU
   return results;
 }
 
-// ==========================================
-// STORE SCRAPER 9: Amazon Official Merch & Music Scraper
-// ==========================================
-async function fetchAmazonProducts(artistName, region = 'UK', customUrl = null) {
-  const results = [];
-  const artistLower = artistName.toLowerCase();
-  const domain =
-    region === 'US'
-      ? 'https://www.amazon.com'
-      : region === 'EU'
-      ? 'https://www.amazon.de'
-      : region === 'AU'
-      ? 'https://www.amazon.com.au'
-      : 'https://www.amazon.co.uk';
+app.get('/api/rates', async (req, res) => {
+  const rates = await refreshExchangeRates();
+  return res.json(rates);
+});
 
-  try {
-    const query = `${artistName} official band merch shirt vinyl`;
-    const targetUrl = customUrl || `${domain}/s?k=${encodeURIComponent(query)}`;
-    const res = await fetchWithTimeout(
-      targetUrl,
-      {
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8'
-        }
-      },
-      4800
-    );
-    if (!res.ok) return [];
-    const html = await res.text();
-
-    const asinBlocks = html.split('data-component-type="s-search-result"').slice(1, 16);
-    let idx = 0;
-    for (const block of asinBlocks) {
-      const asinMatch = block.match(/data-asin="([A-Z0-9]{10})"/i);
-      const imgMatch = block.match(/<img[^>]*class="[^"]*s-image[^"]*"[^>]*src="([^"]+)"[^>]*alt="([^"]+)"/i);
-      const priceMatch = block.match(/<span[^>]*class="[^"]*a-offscreen[^"]*"[^>]*>([^<]+)<\/span>/i);
-
-      if (!imgMatch) continue;
-      const rawTitle = imgMatch[2].replace(/&amp;/g, '&').replace(/&#39;/g, "'").trim();
-      const imageUrl = imgMatch[1].trim();
-      const asin = asinMatch ? asinMatch[1] : null;
-      const titleLower = rawTitle.toLowerCase();
-
-      if (!titleLower.includes(artistLower)) continue;
-      if (!/shirt|tee|hoodie|sweat|vinyl|lp|cd|merch|longsleeve|beanie|cap|patch|poster/i.test(titleLower)) continue;
-
-      idx++;
-      const priceNum = priceMatch ? priceMatch[1].replace(/[^0-9.]/g, '') || '22.99' : '22.99';
-      const productUrl = asin ? `${domain}/dp/${asin}` : targetUrl;
-      const isApparel = /shirt|tee|hoodie|sweat|longsleeve|jacket/i.test(titleLower);
-
-      results.push({
-        id: `amz-${asin || idx}-${artistLower.replace(/[^a-z0-9]/g, '')}`,
-        title: rawTitle,
-        product_type: /hoodie|sweat/i.test(titleLower)
-          ? 'Hoodie'
-          : /vinyl|lp|cd|record/i.test(titleLower)
-          ? 'Vinyl'
-          : /beanie|cap|patch|poster/i.test(titleLower)
-          ? 'Accessories'
-          : 'T-Shirt',
-        vendor: `Amazon ${region}`,
-        sourcePlatform: 'AMAZON',
-        storeBaseUrl: domain,
-        productUrl,
-        imageUrl,
-        tags: ['amazon'],
-        variants: isApparel
-          ? ['S', 'M', 'L', 'XL', '2XL'].map((sz, i) => ({
-              id: `amz-v-${idx}-${i}`,
-              title: sz,
-              price: priceNum,
-              available: true
-            }))
-          : [{ id: `amz-v-${idx}-os`, title: 'One Size', price: priceNum, available: true }]
-      });
-      if (idx >= 10) break;
-    }
-  } catch {}
-
-  return results;
-}
-
-// ==========================================
-// PUBLIC PLAYLIST ARTIST EXTRACTOR (NO OAUTH NEEDED)
-// ==========================================
 app.get('/api/playlist', async (req, res) => {
   const rawUrl = (req.query.url || '').trim();
   const match = rawUrl.match(/playlist\/([a-zA-Z0-9]+)/);
@@ -1110,18 +969,16 @@ app.get('/api/playlist', async (req, res) => {
 
     const artistMap = new Map();
     for (const item of trackList) {
-      if (item.isRecommended || item.recommendation) continue;
-
-      const rawSubtitle = (item.subtitle || '').replace(/\u00A0/g, ' ');
+      const rawSubtitle = item.subtitle || '';
       const names = Array.isArray(item.artists)
         ? item.artists.map((a) => a.name).filter(Boolean)
-        : rawSubtitle.split(/,\s+/).map((s) => s.trim()).filter(Boolean);
+        : rawSubtitle.split(/,\s*/).map((s) => s.trim()).filter(Boolean);
 
       for (const name of names) {
         const key = name.toLowerCase();
         if (!artistMap.has(key)) {
           artistMap.set(key, {
-            id: `pl-${Buffer.from(key).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 32)}`,
+            id: `pl-${Buffer.from(key).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 16)}`,
             name,
             image: null,
             genres: [],
@@ -1146,9 +1003,6 @@ app.get('/api/playlist', async (req, res) => {
   }
 });
 
-// ==========================================
-// MAIN /api/discover ENDPOINT
-// ==========================================
 app.get('/api/discover', async (req, res) => {
   const artistName = (req.query.artist || '').trim();
   const spotifyId = (req.query.spotifyId || '').trim();
@@ -1156,56 +1010,67 @@ app.get('/api/discover', async (req, res) => {
   const preferredRegion = (req.query.region || 'UK').toUpperCase();
   const forceRefresh = req.query.force === '1' || req.query.force === 'true';
 
-  let siteOverrides = {};
+  let userSiteOverrides = {};
   if (req.query.siteOverrides) {
     try {
-      siteOverrides = JSON.parse(String(req.query.siteOverrides));
+      const parsed = JSON.parse(req.query.siteOverrides);
+      if (parsed && typeof parsed === 'object') {
+        for (const [k, v] of Object.entries(parsed)) {
+          if (isSafeHttpUrl(v)) userSiteOverrides[k] = String(v).trim();
+        }
+      }
     } catch {}
   }
 
   if (!artistName) return res.status(400).json({ error: 'Missing artist parameter' });
-  const cacheKey = `${artistName.toLowerCase()}::${preferredRegion}::v5`;
+  const artistKey = artistName.toLowerCase();
+  const cacheKey = `${artistKey}::${preferredRegion}::v5`;
 
-  if (customUrl && Object.keys(siteOverrides).length === 0) {
-    const manualProbe = await probeShopifyFeed(customUrl, 'OFFICIAL');
-    return res.json({
-      artist: artistName,
-      artistImage: cache[cacheKey]?.artistImage || (await lookupArtistPhoto(artistName)),
-      storeUrl: manualProbe?.storeUrl || customUrl,
-      officialWebsite: cache[cacheKey]?.officialWebsite || customUrl,
-      source: manualProbe ? 'manual-shopify' : 'manual-link',
-      products: manualProbe?.products || [],
-      genres: cache[cacheKey]?.genres || []
-    });
+  const sharedVerifiedForBand = cache.verifiedOverrides[artistKey] || {};
+  const effectiveOverrides = {
+    ...sharedVerifiedForBand,
+    ...userSiteOverrides
+  };
+  if (customUrl && isSafeHttpUrl(customUrl) && !effectiveOverrides.OFFICIAL) {
+    effectiveOverrides.OFFICIAL = customUrl;
   }
+
+  const hasUserSubmittedEdits = Object.keys(userSiteOverrides).length > 0 || Boolean(customUrl);
+  const hasSharedVerified = Object.keys(sharedVerifiedForBand).length > 0;
 
   if (
     !forceRefresh &&
-    cache[cacheKey] &&
-    Array.isArray(cache[cacheKey].products) &&
-    cache[cacheKey].products.length > 0 &&
-    Date.now() - cache[cacheKey].updatedAt < 7 * 86400000
+    !hasUserSubmittedEdits &&
+    cache.bands[cacheKey] &&
+    Array.isArray(cache.bands[cacheKey].products) &&
+    cache.bands[cacheKey].products.length > 0 &&
+    Date.now() - cache.bands[cacheKey].updatedAt < 7 * 86400000
   ) {
-    return res.json(cache[cacheKey]);
+    const cachedBand = cache.bands[cacheKey];
+    return res.json({
+      ...cachedBand,
+      verifiedOverrides: sharedVerifiedForBand,
+      products: enrichProductsWithCurrencyAndDropMeta(cachedBand.products, artistName)
+    });
   }
 
   try {
     const [wikidata, { urls, genres }, artistImage] = await Promise.all([
       lookupWikidataBySpotifyId(spotifyId),
       lookupMusicBrainz(artistName),
-      lookupArtistPhoto(artistName)
+      fetchArtistPortraitImage(artistName)
     ]);
 
-    let officialWebsite = siteOverrides.WEBSITE || wikidata.officialWebsite || null;
-    let bandcampUrl = siteOverrides.BANDCAMP || wikidata.bandcampUrl || null;
+    let officialWebsite = effectiveOverrides.WEBSITE || wikidata.officialWebsite || null;
+    let bandcampUrl = effectiveOverrides.BANDCAMP || wikidata.bandcampUrl || null;
     const regionalWebsites = {};
     const regionalStores = {};
     const webPresence = {};
     const candidateShopifyDomains = new Set();
     const candidateBigCartelDomains = new Set();
 
-    if (siteOverrides.OFFICIAL || customUrl) candidateShopifyDomains.add(siteOverrides.OFFICIAL || customUrl);
-    if (siteOverrides.BIGCARTEL) candidateBigCartelDomains.add(siteOverrides.BIGCARTEL);
+    if (effectiveOverrides.OFFICIAL) candidateShopifyDomains.add(effectiveOverrides.OFFICIAL);
+    if (effectiveOverrides.BIGCARTEL) candidateBigCartelDomains.add(effectiveOverrides.BIGCARTEL);
 
     for (const rel of urls) {
       const u = rel.url;
@@ -1269,7 +1134,6 @@ app.get('/api/discover', async (req, res) => {
     }
 
     const shopifyDomainList = Array.from(candidateShopifyDomains).slice(0, 6);
-    const distroHubsWithoutEyesore = SHOPIFY_DISTRO_HUBS.filter((d) => d.id !== 'EYESORE');
 
     const [
       shopifyProbeResults,
@@ -1279,18 +1143,20 @@ app.get('/api/discover', async (req, res) => {
       merchbarItems,
       eyesoreItems,
       impericonItems,
-      krItems,
-      amazonItems
+      krItems
     ] = await Promise.all([
       Promise.all(shopifyDomainList.map((domain) => probeShopifyFeed(domain, 'OFFICIAL'))),
-      Promise.all(distroHubsWithoutEyesore.map((distro) => fetchShopifyDistroProducts(distro, artistName, siteOverrides[distro.id]))),
+      Promise.all(
+        SHOPIFY_DISTRO_HUBS.map((distro) =>
+          fetchShopifyDistroProducts(distro, artistName, effectiveOverrides[distro.id] || null)
+        )
+      ),
       fetchBigCartelProducts(Array.from(candidateBigCartelDomains), artistName),
       fetchBandcampProducts(bandcampUrl, artistName, officialWebsite),
-      fetchMerchbarProducts(artistName, siteOverrides.MERCHBAR),
-      fetchEyesoreProducts(artistName, siteOverrides.EYESORE),
-      fetchImpericonProducts(artistName, preferredRegion, siteOverrides.IMPERICON),
-      fetchKingsRoadAndBleepProducts(artistName, preferredRegion, siteOverrides.KINGSROAD),
-      fetchAmazonProducts(artistName, preferredRegion, siteOverrides.AMAZON)
+      fetchMerchbarProducts(artistName, effectiveOverrides.MERCHBAR || null),
+      fetchEyesoreProducts(artistName, effectiveOverrides.EYESORE || null),
+      fetchImpericonProducts(artistName, preferredRegion, effectiveOverrides.IMPERICON || null),
+      fetchKingsRoadAndBleepProducts(artistName, preferredRegion, effectiveOverrides.KINGSROAD || null)
     ]);
 
     const officialStoreResult = shopifyProbeResults.find(Boolean) || null;
@@ -1305,7 +1171,7 @@ app.get('/api/discover', async (req, res) => {
       webPresence.bandcamp = bandcampUrl;
     }
 
-    const combinedProducts = [
+    const rawCombined = [
       ...(officialStoreResult?.products || []),
       ...bigCartelItems,
       ...bandcampItems,
@@ -1313,9 +1179,35 @@ app.get('/api/discover', async (req, res) => {
       ...merchbarItems,
       ...eyesoreItems,
       ...impericonItems,
-      ...krItems,
-      ...amazonItems
+      ...krItems
     ];
+
+    const platformHitCounts = {};
+    for (const item of rawCombined) {
+      platformHitCounts[item.sourcePlatform] = (platformHitCounts[item.sourcePlatform] || 0) + 1;
+    }
+
+    let promotedNewSharedOverride = false;
+    const updatedSharedOverrides = { ...(cache.verifiedOverrides[artistKey] || {}) };
+    for (const [platKey, submittedUrl] of Object.entries(userSiteOverrides)) {
+      if (platKey === 'WEBSITE' && isSafeHttpUrl(submittedUrl)) {
+        updatedSharedOverrides.WEBSITE = submittedUrl;
+        promotedNewSharedOverride = true;
+      } else if ((platformHitCounts[platKey] || 0) > 0) {
+        updatedSharedOverrides[platKey] = submittedUrl;
+        promotedNewSharedOverride = true;
+      }
+    }
+    if (customUrl && (platformHitCounts.OFFICIAL || 0) > 0) {
+      updatedSharedOverrides.OFFICIAL = customUrl;
+      promotedNewSharedOverride = true;
+    }
+
+    if (promotedNewSharedOverride) {
+      cache.verifiedOverrides[artistKey] = updatedSharedOverrides;
+    }
+
+    const enrichedProducts = enrichProductsWithCurrencyAndDropMeta(rawCombined, artistName);
 
     const verifiedStoreUrl =
       officialStoreResult?.storeUrl ||
@@ -1331,15 +1223,23 @@ app.get('/api/discover', async (req, res) => {
       regionalWebsites,
       regionalStores,
       webPresence,
+      verifiedOverrides: cache.verifiedOverrides[artistKey] || {},
       storeUrl: verifiedStoreUrl,
       bandcampUrl: bandcampItems.length > 0 || webPresence.bandcamp ? bandcampUrl : null,
-      source: combinedProducts.length > 0 ? 'multi-platform-live' : officialWebsite ? 'official-site' : 'none',
-      products: combinedProducts,
+      source:
+        enrichedProducts.length > 0
+          ? hasSharedVerified || promotedNewSharedOverride
+            ? 'community-verified-live'
+            : 'multi-platform-live'
+          : officialWebsite
+          ? 'official-site'
+          : 'none',
+      products: enrichedProducts,
       genres,
       updatedAt: Date.now()
     };
 
-    cache[cacheKey] = payload;
+    cache.bands[cacheKey] = payload;
     saveCache();
     return res.json(payload);
   } catch (err) {
@@ -1347,17 +1247,12 @@ app.get('/api/discover', async (req, res) => {
   }
 });
 
-// ==========================================
-// PRODUCTION STATIC FRONTEND SERVER (EXPRESS 5 SAFE)
-// ==========================================
-const distPath = path.join(__dirname, 'dist');
 if (fs.existsSync(distPath)) {
-  app.use(express.static(distPath));
-  app.use((req, res) => {
+  app.get('*', (req, res) => {
     res.sendFile(path.join(distPath, 'index.html'));
   });
 }
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`MerchPulse 15-Site Aggregator running on port ${PORT}`);
+  console.log(`MerchPulse 15-Site Turbo Discovery Proxy running on port ${PORT}`);
 });
