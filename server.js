@@ -1248,7 +1248,7 @@ app.get('/api/discover', async (req, res) => {
 });
 
 if (fs.existsSync(distPath)) {
-  app.get('*', (req, res) => {
+  app.use((req, res) => {
     res.sendFile(path.join(distPath, 'index.html'));
   });
 }
