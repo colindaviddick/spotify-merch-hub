@@ -84,7 +84,6 @@ function getSizedThumbnailUrl(rawUrl, thumbSize = 'medium') {
   return url;
 }
 
-// Safe localStorage writer that prevents QuotaExceededError crashes and prunes heavy feed cache first
 function safeSetLocalStorage(key, valueString, onQuotaExceeded = null) {
   try {
     localStorage.setItem(key, valueString);
@@ -625,7 +624,6 @@ function deduplicateArtists(list = []) {
 export default function App() {
   const initialParams = useMemo(() => new URLSearchParams(window.location.search), []);
 
-  // --- Exchange Rates State ---
   const [exchangeRates, setExchangeRates] = useState({
     USD: 1.0,
     GBP: 0.79,
@@ -643,7 +641,6 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // --- Playlist Import & Artist State ---
   const [spotifyArtists, setSpotifyArtists] = useState(() => {
     try {
       const saved = localStorage.getItem('spotify_merch_cached_artists_v1');
@@ -652,18 +649,21 @@ export default function App() {
       return [];
     }
   });
+  const [inputSourceTab, setInputSourceTab] = useState('SPOTIFY');
   const [playlistUrl, setPlaylistUrl] = useState('');
+  const [lastfmUsername, setLastfmUsername] = useState(() => localStorage.getItem('merchpulse_lastfm_user') || '');
+  const [lastfmPeriod, setLastfmPeriod] = useState('overall');
+  const [plainBandText, setPlainBandText] = useState('');
+  const [showPlainTextDrawer, setShowPlainTextDrawer] = useState(false);
   const [importMode, setImportMode] = useState('REPLACE');
   const [loadedPlaylistName, setLoadedPlaylistName] = useState(() => localStorage.getItem('spotify_merch_playlist_name') || '');
   const [activePlaylistUrl, setActivePlaylistUrl] = useState(() => initialParams.get('playlist') || localStorage.getItem('spotify_merch_playlist_url') || '');
   const [isImportingPlaylist, setIsImportingPlaylist] = useState(false);
   const [playlistError, setPlaylistError] = useState('');
 
-  // --- View Mode (Band Cards vs Constant Product Stream) & Sorting ---
   const [viewMode, setViewMode] = useState(() => initialParams.get('view') || localStorage.getItem('merchpulse_view_mode') || 'BANDS');
   const [sortBy, setSortBy] = useState(() => initialParams.get('sort') || localStorage.getItem('merchpulse_sort_by') || 'FEATURED');
 
-  // --- Filters & Pagination ---
   const [preferredRegion, setPreferredRegion] = useState(
     () => (initialParams.get('region') || localStorage.getItem('spotify_merch_region') || 'UK').toUpperCase()
   );
@@ -683,12 +683,10 @@ export default function App() {
   const BANDS_PER_PAGE = 15;
   const STREAM_ITEMS_PER_PAGE = 60;
 
-  // --- Per-Band Site Filter Toggles, Expansion & Extracted Dominant Accent Colors ---
   const [bandSiteFilters, setBandSiteFilters] = useState({});
   const [expandedBandCards, setExpandedBandCards] = useState({});
   const [bandAccentColors, setBandAccentColors] = useState({});
 
-  // --- Independent Saved Merch / Wishlist Drawer (Highest Storage Priority) ---
   const [savedMerchItems, setSavedMerchItems] = useState(() => {
     try {
       const raw = localStorage.getItem('merchpulse_saved_wishlist_v1');
@@ -708,7 +706,6 @@ export default function App() {
   const [copiedShareLink, setCopiedShareLink] = useState(false);
   const [copiedWishlistLinks, setCopiedWishlistLinks] = useState(false);
 
-  // --- Out-of-Stock Size Watchers (persisted across sessions) ---
   const [watchedSizes, setWatchedSizes] = useState(() => {
     try {
       const raw = localStorage.getItem('merchpulse_size_watchers_v1');
@@ -718,12 +715,10 @@ export default function App() {
     }
   });
 
-  // --- Product Quick-View Modal & Mobile Filter Drawer ---
   const [quickViewItem, setQuickViewItem] = useState(null);
   const [quickViewActiveImg, setQuickViewActiveImg] = useState(null);
   const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
 
-  // --- Scraped Merch Feeds & Metadata ---
   const [liveShopifyFeeds, setLiveShopifyFeeds] = useState(() => {
     try {
       const raw = localStorage.getItem('spotify_merch_live_feeds_v2');
@@ -768,14 +763,12 @@ export default function App() {
     }
   });
 
-  // --- Scraper Queue & Concurrency ---
   const [autoScrapeEnabled, setAutoScrapeEnabled] = useState(true);
   const [scraperConcurrency, setScraperConcurrency] = useState(3);
   const [activelyScanningIds, setActivelyScanningIds] = useState([]);
   const [proxyOnline, setProxyOnline] = useState(null);
   const activeWorkersRef = useRef(0);
 
-  // --- Band Links Editor Modal State ---
   const [editingArtist, setEditingArtist] = useState(null);
   const [linkForm, setLinkForm] = useState({
     OFFICIAL: '',
@@ -802,7 +795,6 @@ export default function App() {
   const [unlockedFields, setUnlockedFields] = useState({});
   const [unlockWarningField, setUnlockWarningField] = useState(null);
 
-  // --- Sync Shareable Filters, View Mode & Sort to Browser URL Query Params ---
   useEffect(() => {
     try {
       const params = new URLSearchParams();
@@ -824,7 +816,6 @@ export default function App() {
     } catch {}
   }, [activePlaylistUrl, viewMode, sortBy, preferredRegion, selectedPlatform, selectedProductType, selectedSize, inStockOnly, newDropsOnly, selectedGenre, searchQuery]);
 
-  // --- Persist Settings, Wishlist, Size Watchers & Lean Feeds ---
   useEffect(() => {
     safeSetLocalStorage('spotify_merch_region', preferredRegion);
   }, [preferredRegion]);
@@ -885,7 +876,6 @@ export default function App() {
     safeSetLocalStorage('spotify_merch_site_overrides_v1', JSON.stringify(customSiteOverrides));
   }, [customSiteOverrides]);
 
-  // --- Size Watcher Toggle & Restock Detection ---
   const watchedSizeKeySet = useMemo(() => {
     return new Set(watchedSizes.map((w) => w.watchKey));
   }, [watchedSizes]);
@@ -933,7 +923,6 @@ export default function App() {
     return hits;
   }, [watchedSizes, spotifyArtists, liveShopifyFeeds]);
 
-  // --- Wishlist Toggle & Management Helpers ---
   const savedProductKeySet = useMemo(() => {
     return new Set(savedMerchItems.map((item) => item.saveKey));
   }, [savedMerchItems]);
@@ -973,7 +962,6 @@ export default function App() {
     setTimeout(() => setCopiedWishlistLinks(false), 2000);
   };
 
-  // --- Dominant Color Extraction from Artist Portrait Image ---
   const extractDominantColorFromImg = useCallback(
     (artistId, imgElement) => {
       if (!imgElement || bandAccentColors[artistId]) return;
@@ -1020,8 +1008,45 @@ export default function App() {
   );
 
   // ==========================================
-  // 6. PUBLIC PLAYLIST URL IMPORTER ("FIND MERCH" / "MERGE")
+  // 6. MULTI-SOURCE ARTIST IMPORTER (SPOTIFY PLAYLIST, LAST.FM, PLAIN TEXT)
   // ==========================================
+  const applyImportedArtistsList = useCallback(
+    (incomingRaw, sourceLabel, mode = 'REPLACE', sourceUrlToPersist = '') => {
+      const incomingArtists = deduplicateArtists(Array.isArray(incomingRaw) ? incomingRaw : []);
+      if (incomingArtists.length === 0) {
+        setPlaylistError('No valid band names were found to import.');
+        return;
+      }
+
+      setSpotifyArtists((prev) => {
+        const nextList =
+          mode === 'MERGE' && prev.length > 0
+            ? deduplicateArtists([...prev, ...incomingArtists]).sort((a, b) => a.name.localeCompare(b.name))
+            : incomingArtists;
+        safeSetLocalStorage('spotify_merch_cached_artists_v1', JSON.stringify(nextList), () => {
+          localStorage.removeItem('spotify_merch_live_feeds_v2');
+        });
+        return nextList;
+      });
+
+      const combinedName =
+        mode === 'MERGE' && loadedPlaylistName && spotifyArtists.length > 0
+          ? `${loadedPlaylistName} + ${sourceLabel}`
+          : sourceLabel;
+
+      setLoadedPlaylistName(combinedName);
+      safeSetLocalStorage('spotify_merch_playlist_name', combinedName);
+      setActivePlaylistUrl(sourceUrlToPersist);
+      safeSetLocalStorage('spotify_merch_playlist_url', sourceUrlToPersist);
+
+      setSelectedBandId(null);
+      setSelectedGenre('ALL');
+      setStoreFilterMode('MATCHING_PRODUCTS');
+      setAutoScrapeEnabled(true);
+    },
+    [loadedPlaylistName, spotifyArtists.length]
+  );
+
   const importPlaylistFromUrl = useCallback(
     async (targetUrl, mode = 'REPLACE') => {
       const trimmed = (targetUrl || '').trim();
@@ -1039,34 +1064,7 @@ export default function App() {
           throw new Error(data.error || 'Could not load playlist. Make sure the Spotify playlist is set to Public.');
         }
 
-        const incomingArtists = deduplicateArtists(Array.isArray(data.artists) ? data.artists : []);
-        const pName = data.playlistName || 'Spotify Playlist';
-
-        setSpotifyArtists((prev) => {
-          const nextList =
-            mode === 'MERGE' && prev.length > 0
-              ? deduplicateArtists([...prev, ...incomingArtists]).sort((a, b) => a.name.localeCompare(b.name))
-              : incomingArtists;
-          safeSetLocalStorage('spotify_merch_cached_artists_v1', JSON.stringify(nextList), () => {
-            localStorage.removeItem('spotify_merch_live_feeds_v2');
-          });
-          return nextList;
-        });
-
-        const combinedName =
-          mode === 'MERGE' && loadedPlaylistName && spotifyArtists.length > 0
-            ? `${loadedPlaylistName} + ${pName}`
-            : pName;
-
-        setLoadedPlaylistName(combinedName);
-        safeSetLocalStorage('spotify_merch_playlist_name', combinedName);
-        setActivePlaylistUrl(trimmed);
-        safeSetLocalStorage('spotify_merch_playlist_url', trimmed);
-
-        setSelectedBandId(null);
-        setSelectedGenre('ALL');
-        setStoreFilterMode('MATCHING_PRODUCTS');
-        setAutoScrapeEnabled(true);
+        applyImportedArtistsList(data.artists || [], data.playlistName || 'Spotify Playlist', mode, trimmed);
         setPlaylistUrl('');
       } catch (err) {
         setPlaylistError(err.message || 'Failed to load playlist.');
@@ -1074,7 +1072,71 @@ export default function App() {
         setIsImportingPlaylist(false);
       }
     },
-    [loadedPlaylistName, spotifyArtists.length]
+    [applyImportedArtistsList]
+  );
+
+  const importFromLastfm = useCallback(
+    async (usernameInput, periodInput = 'overall', mode = 'REPLACE') => {
+      const cleanUser = (usernameInput || '').trim();
+      if (!cleanUser) return;
+
+      setIsImportingPlaylist(true);
+      setPlaylistError('');
+
+      try {
+        const apiUrl = new URL('/api/lastfm', window.location.origin);
+        apiUrl.searchParams.set('username', cleanUser);
+        apiUrl.searchParams.set('period', periodInput);
+        apiUrl.searchParams.set('limit', '120');
+
+        const res = await fetch(apiUrl.toString());
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Could not fetch Last.fm artists.');
+        }
+
+        safeSetLocalStorage('merchpulse_lastfm_user', cleanUser);
+        applyImportedArtistsList(data.artists || [], data.sourceName || `Last.fm: ${cleanUser}`, mode, '');
+      } catch (err) {
+        setPlaylistError(err.message || 'Failed to load Last.fm profile.');
+      } finally {
+        setIsImportingPlaylist(false);
+      }
+    },
+    [applyImportedArtistsList]
+  );
+
+  const importFromPlainTextList = useCallback(
+    (rawText, mode = 'REPLACE') => {
+      const tokens = String(rawText || '')
+        .split(/\r?\n|,|;/)
+        .map((line) => line.replace(/^[\s\-*•\d.)]+/, '').trim())
+        .filter((name) => name.length > 0);
+
+      if (tokens.length === 0) {
+        setPlaylistError('Paste at least one band name (one per line or comma-separated).');
+        return;
+      }
+
+      setPlaylistError('');
+      const formatted = tokens.map((name, idx) => {
+        const key = name.toLowerCase();
+        return {
+          id: `txt-${btoa(unescape(encodeURIComponent(key))).replace(/[^a-zA-Z0-9]/g, '').slice(0, 16)}-${idx}`,
+          name,
+          image: null,
+          genres: [],
+          spotifyUrl: `https://open.spotify.com/search/${encodeURIComponent(name)}`,
+          followed: false,
+          likedTracksCount: Math.max(1, tokens.length - idx)
+        };
+      });
+
+      applyImportedArtistsList(formatted, `Custom List (${formatted.length} bands)`, mode, '');
+      setPlainBandText('');
+      setShowPlainTextDrawer(false);
+    },
+    [applyImportedArtistsList]
   );
 
   const initialAutoLoadDoneRef = useRef(false);
@@ -1089,7 +1151,13 @@ export default function App() {
 
   const handleFindMerchSubmit = (e) => {
     if (e) e.preventDefault();
-    importPlaylistFromUrl(playlistUrl, importMode);
+    if (inputSourceTab === 'LASTFM') {
+      importFromLastfm(lastfmUsername, lastfmPeriod, importMode);
+    } else if (inputSourceTab === 'TEXT') {
+      importFromPlainTextList(plainBandText, importMode);
+    } else {
+      importPlaylistFromUrl(playlistUrl, importMode);
+    }
   };
 
   // ==========================================
@@ -1525,7 +1593,7 @@ export default function App() {
   }, [autoScrapeEnabled, unscrapedQueue, scraperConcurrency, discoverArtistMerch, customStoreUrls]);
 
   // ==========================================
-  // 10. BAND LINKS MODAL HANDLERS (PRE-FILLED WITH SHARED VERIFIED OVERRIDES)
+  // 10. BAND LINKS MODAL HANDLERS
   // ==========================================
   const openBandLinksModal = (artist) => {
     const meta = discoveryMeta[artist.id] || {};
@@ -1638,7 +1706,6 @@ export default function App() {
     .filter(Boolean)
     .join(', ');
 
-  // Reusable Product Card Renderer
   const renderProductCard = (product, artistName, showBandHeader = false) => {
     const platMeta = getPlatformMeta(product.sourcePlatform);
     const variants = Array.isArray(product.variants) ? product.variants : [];
@@ -1655,7 +1722,6 @@ export default function App() {
         key={`${artistName}-${product.sourcePlatform}-${product.id}-${product.title}`}
         className="group relative bg-zinc-950/85 border border-zinc-800/90 hover:border-emerald-500/50 rounded-xl overflow-hidden flex flex-col justify-between transition-all"
       >
-        {/* Top-Right Quick Action Buttons */}
         <div className="absolute top-2 right-2 z-20 flex items-center gap-1">
           <button
             type="button"
@@ -1789,10 +1855,8 @@ export default function App() {
     );
   };
 
-  // Reusable Sidebar Filter Content
   const renderSidebarControls = () => (
     <div className="space-y-4">
-      {/* 1. MERCH & STORE FILTERS */}
       <div className="bg-zinc-900/80 border border-zinc-800/90 rounded-2xl p-4 space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -1821,7 +1885,6 @@ export default function App() {
           )}
         </div>
 
-        {/* Band Feed Status */}
         <div className="space-y-1.5">
           <label className="text-[11px] font-medium text-zinc-400">Band Feed Status</label>
           <div className="grid grid-cols-2 gap-1.5">
@@ -1855,7 +1918,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* New Drops & Stock Quick Toggles */}
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
@@ -1883,7 +1945,6 @@ export default function App() {
           </button>
         </div>
 
-        {/* Product Thumbnail Size */}
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
             <label className="text-[11px] font-medium text-zinc-400">Product Thumbnail Size (CDN Res)</label>
@@ -1919,7 +1980,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Product Type */}
         <div className="space-y-1.5">
           <label className="text-[11px] font-medium text-zinc-400">Product Type</label>
           <div className="flex flex-wrap gap-1.5">
@@ -1939,7 +1999,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Extended Sizes */}
         <div className="space-y-1.5">
           <label className="text-[11px] font-medium text-zinc-400">Size (XS–5XL Alias Normalized)</label>
           <div className="flex flex-wrap gap-1">
@@ -1959,7 +2018,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Filter by Site / Retailer */}
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
             <label className="text-[11px] font-medium text-zinc-400">Filter by Site / Retailer</label>
@@ -2003,7 +2061,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* 2. ALL BANDS DIRECTORY */}
       <div className="bg-zinc-900/80 border border-zinc-800/90 rounded-2xl p-4 space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -2077,7 +2134,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* 3. FILTER BY GENRE */}
       <div className="bg-zinc-900/80 border border-zinc-800/90 rounded-2xl p-4 space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -2125,7 +2181,6 @@ export default function App() {
         )}
       </div>
 
-      {/* 4. MULTI-SITE SCRAPER */}
       <div className="bg-zinc-900/80 border border-zinc-800/90 rounded-2xl p-4 space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -2159,101 +2214,116 @@ export default function App() {
             ))}
           </div>
         </div>
-
-        <div className="flex gap-2 pt-1">
-          <button
-            onClick={() => {
-              for (const band of paginatedArtists) {
-                discoverArtistMerch(band, customStoreUrls[band.id] || null, true);
-              }
-            }}
-            disabled={paginatedArtists.length === 0}
-            className="flex-1 py-2 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-xs font-semibold text-zinc-200 border border-zinc-700 transition-colors cursor-pointer flex items-center justify-center gap-1.5"
-          >
-            <RefreshCw className="w-3.5 h-3.5" /> Scrape Current Page
-          </button>
-        </div>
       </div>
     </div>
   );
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans selection:bg-emerald-500/30 selection:text-emerald-200 pb-20 lg:pb-6">
-      <style>{`
-        * {
-          scrollbar-width: thin;
-          scrollbar-color: #27272a #09090b;
-        }
-        ::-webkit-scrollbar {
-          width: 6px;
-          height: 6px;
-        }
-        ::-webkit-scrollbar-track {
-          background: #09090b;
-          border-radius: 9999px;
-        }
-        ::-webkit-scrollbar-thumb {
-          background: #27272a;
-          border-radius: 9999px;
-          border: 1px solid #18181b;
-        }
-        ::-webkit-scrollbar-thumb:hover {
-          background: #10b981;
-        }
-      `}</style>
-
-      {/* ==========================================
-          STICKY 2-ROW HEADER
-      ========================================== */}
-      <header className="sticky top-0 z-30 bg-zinc-950/90 backdrop-blur-md border-b border-zinc-800/80">
-        <div className="max-w-[1600px] mx-auto px-4 py-2.5 space-y-2">
-          <div className="flex flex-wrap items-center justify-between gap-2.5">
-            <div className="flex items-center gap-3 shrink-0">
-              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-950/50">
-                <ShoppingBag className="w-5 h-5 text-zinc-950 stroke-[2.5]" />
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans selection:bg-emerald-500 selection:text-zinc-950 pb-20 lg:pb-6">
+      <header className="sticky top-0 z-30 bg-zinc-950/90 backdrop-blur-xl border-b border-zinc-800/80">
+        <div className="max-w-[1600px] mx-auto px-4 py-3 space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-950/50 shrink-0">
+                <ShoppingBag className="w-4 h-4 text-zinc-950 stroke-[2.5]" />
               </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <h1 className="text-lg font-bold tracking-tight text-white">MerchPulse</h1>
-                  <span className="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-                    15-Site Live Aggregator
-                  </span>
-                </div>
-                <p className="text-xs text-zinc-400 hidden xl:block">
-                  {loadedPlaylistName && spotifyArtists.length > 0
-                    ? `Loaded: ${loadedPlaylistName} (${spotifyArtists.length} bands)`
-                    : 'Paste any public Spotify playlist URL to scan 15+ official & indie merch stores'}
-                </p>
+              <div className="flex items-baseline gap-2.5">
+                <h1 className="text-base font-bold tracking-tight text-white">MerchPulse</h1>
+                <span className="hidden xl:inline text-xs text-zinc-400 truncate max-w-[200px]">
+                  {loadedPlaylistName ? `Loaded: ${loadedPlaylistName}` : '15-Site Band Merch Aggregator'}
+                </span>
               </div>
             </div>
 
-            <form onSubmit={handleFindMerchSubmit} className="flex items-center gap-1.5 flex-1 max-w-2xl min-w-[260px]">
-              <div className="relative flex-1">
-                <Music2 className="w-4 h-4 text-emerald-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                <input
-                  type="url"
-                  value={playlistUrl}
-                  onChange={(e) => setPlaylistUrl(e.target.value)}
-                  placeholder="Paste public Spotify playlist link (https://open.spotify.com/playlist/...)"
-                  className="w-full bg-zinc-900 border border-zinc-800 focus:border-emerald-500 rounded-xl pl-9 pr-7 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none"
-                />
-                {playlistUrl && (
+            <form onSubmit={handleFindMerchSubmit} className="flex flex-wrap items-center gap-1.5 flex-1 max-w-3xl min-w-[260px]">
+              <div className="flex items-center bg-zinc-900 p-0.5 rounded-xl border border-zinc-800 shrink-0">
+                {[
+                  { id: 'SPOTIFY', label: 'Spotify' },
+                  { id: 'LASTFM', label: 'Last.fm' },
+                  { id: 'TEXT', label: 'Band List' }
+                ].map((tab) => (
                   <button
+                    key={tab.id}
                     type="button"
-                    onClick={() => setPlaylistUrl('')}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 cursor-pointer"
+                    onClick={() => {
+                      setInputSourceTab(tab.id);
+                      if (tab.id === 'TEXT') setShowPlainTextDrawer(true);
+                    }}
+                    className={`px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
+                      inputSourceTab === tab.id
+                        ? 'bg-emerald-500 text-zinc-950 font-bold shadow-sm'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
                   >
-                    <X className="w-3.5 h-3.5" />
+                    {tab.label}
                   </button>
-                )}
+                ))}
               </div>
+
+              {inputSourceTab === 'SPOTIFY' && (
+                <div className="relative flex-1 min-w-[190px]">
+                  <Music2 className="w-4 h-4 text-emerald-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="url"
+                    value={playlistUrl}
+                    onChange={(e) => setPlaylistUrl(e.target.value)}
+                    placeholder="Paste public Spotify playlist link..."
+                    className="w-full bg-zinc-900 border border-zinc-800 focus:border-emerald-500 rounded-xl pl-9 pr-7 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none"
+                  />
+                  {playlistUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setPlaylistUrl('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {inputSourceTab === 'LASTFM' && (
+                <div className="flex items-center gap-1.5 flex-1 min-w-[200px]">
+                  <input
+                    type="text"
+                    value={lastfmUsername}
+                    onChange={(e) => setLastfmUsername(e.target.value)}
+                    placeholder="Enter Last.fm username..."
+                    className="flex-1 bg-zinc-900 border border-zinc-800 focus:border-emerald-500 rounded-xl px-3 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none"
+                  />
+                  <select
+                    value={lastfmPeriod}
+                    onChange={(e) => setLastfmPeriod(e.target.value)}
+                    aria-label="Last.fm time period"
+                    className="bg-zinc-900 border border-zinc-800 rounded-xl px-2 py-2 text-xs font-semibold text-zinc-300 focus:outline-none focus:border-emerald-500 cursor-pointer"
+                  >
+                    <option value="overall">All Time</option>
+                    <option value="12month">12 Months</option>
+                    <option value="6month">6 Months</option>
+                    <option value="1month">30 Days</option>
+                    <option value="7day">7 Days</option>
+                  </select>
+                </div>
+              )}
+
+              {inputSourceTab === 'TEXT' && (
+                <button
+                  type="button"
+                  onClick={() => setShowPlainTextDrawer(true)}
+                  className="flex-1 min-w-[190px] bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-left text-zinc-300 truncate cursor-pointer"
+                >
+                  {plainBandText.trim()
+                    ? `${plainBandText.split(/\r?\n|,|;/).filter((s) => s.trim()).length} bands ready — click to edit`
+                    : 'Click to paste band list (one per line)...'}
+                </button>
+              )}
 
               {spotifyArtists.length > 0 && (
                 <div className="hidden sm:flex items-center bg-zinc-900 p-0.5 rounded-xl border border-zinc-800 shrink-0">
                   <button
                     type="button"
                     onClick={() => setImportMode('REPLACE')}
-                    title="Replace current playlist bands"
+                    title="Replace current bands"
                     className={`px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
                       importMode === 'REPLACE' ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'
                     }`}
@@ -2263,7 +2333,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setImportMode('MERGE')}
-                    title="Append & merge new playlist bands into current list"
+                    title="Append & merge new bands into current list"
                     className={`px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer flex items-center gap-1 ${
                       importMode === 'MERGE' ? 'bg-emerald-500/20 text-emerald-300' : 'text-zinc-400 hover:text-zinc-200'
                     }`}
@@ -2275,7 +2345,12 @@ export default function App() {
 
               <button
                 type="submit"
-                disabled={!playlistUrl.trim() || isImportingPlaylist}
+                disabled={
+                  isImportingPlaylist ||
+                  (inputSourceTab === 'SPOTIFY' && !playlistUrl.trim()) ||
+                  (inputSourceTab === 'LASTFM' && !lastfmUsername.trim()) ||
+                  (inputSourceTab === 'TEXT' && !plainBandText.trim())
+                }
                 className="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-zinc-950 font-bold text-xs transition-colors cursor-pointer shrink-0 flex items-center gap-1.5 shadow-sm"
               >
                 {isImportingPlaylist ? (
@@ -2421,18 +2496,12 @@ export default function App() {
         </div>
       </header>
 
-      {/* ==========================================
-          MAIN CONTENT GRID
-      ========================================== */}
       <main className="max-w-[1600px] mx-auto px-4 py-5 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* DESKTOP LEFT SIDEBAR */}
         <aside className="hidden lg:block lg:col-span-4 xl:col-span-3 lg:sticky lg:top-28 lg:max-h-[calc(100vh-7.5rem)] lg:overflow-y-auto pr-1">
           {renderSidebarControls()}
         </aside>
 
-        {/* RIGHT MAIN FEED */}
         <section className="lg:col-span-8 xl:col-span-9 space-y-4">
-          {/* Restock Alert Banner if any watched out-of-stock sizes came back in stock */}
           {restockedWatchers.length > 0 && (
             <div className="bg-emerald-500/15 border border-emerald-400/50 rounded-2xl p-3.5 flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2.5 text-xs text-emerald-200">
@@ -2451,7 +2520,6 @@ export default function App() {
             </div>
           )}
 
-          {/* Search, View Mode Switcher & Sort Bar */}
           <div className="bg-zinc-900/80 border border-zinc-800/90 rounded-2xl p-3.5 flex flex-wrap items-center justify-between gap-3">
             <div className="relative flex-1 min-w-[200px]">
               <Search className="w-4 h-4 text-zinc-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -2547,7 +2615,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Empty State / Skeleton Loading / Active View */}
           {isImportingPlaylist && spotifyArtists.length === 0 ? (
             <div className="space-y-4">
               {[1, 2, 3].map((skel) => (
@@ -2573,11 +2640,11 @@ export default function App() {
                 <Music2 className="w-7 h-7 text-emerald-400" />
               </div>
               <div className="space-y-1.5 max-w-lg mx-auto">
-                <h3 className="text-base font-bold text-white">Paste a Spotify Playlist or Try a One-Click Preset</h3>
+                <h3 className="text-base font-bold text-white">Import Bands from Spotify, Last.fm, or a Custom List</h3>
                 <p className="text-xs text-zinc-400">
-                  Paste any public Spotify playlist URL into the bar at the top and click{' '}
-                  <strong className="text-emerald-300">Find Merch</strong> to automatically scan 15+ official and indie merch
-                  stores with live currency conversion and drop tracking.
+                  Switch between <strong className="text-emerald-300">Spotify</strong> (public playlist URL),{' '}
+                  <strong className="text-emerald-300">Last.fm</strong> (top artists by username), or{' '}
+                  <strong className="text-emerald-300">Band List</strong> (paste any list of bands) in the top bar—or try a preset below.
                 </p>
               </div>
 
@@ -2593,6 +2660,17 @@ export default function App() {
                     <span>{preset.label}</span>
                   </button>
                 ))}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInputSourceTab('TEXT');
+                    setShowPlainTextDrawer(true);
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 hover:border-emerald-500/50 text-xs font-semibold text-zinc-200 flex items-center gap-1.5 transition-all cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Paste Custom Band List</span>
+                </button>
               </div>
             </div>
           ) : viewMode === 'STREAM' ? (
@@ -2647,7 +2725,6 @@ export default function App() {
               </p>
             </div>
           ) : (
-            /* ARTIST BAND CARDS LIST */
             <div className="space-y-5">
               {paginatedArtists.map((artist) => {
                 const st = artistStatsMap.get(artist.id) || {
@@ -2905,7 +2982,6 @@ export default function App() {
             </div>
           )}
 
-          {/* Pagination Bar */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between bg-zinc-900/80 border border-zinc-800 rounded-2xl px-4 py-3">
               <button
@@ -2931,9 +3007,6 @@ export default function App() {
         </section>
       </main>
 
-      {/* ==========================================
-          STICKY MOBILE FILTER & DIRECTORY BAR (<1024px)
-      ========================================== */}
       <div className="lg:hidden fixed bottom-3 left-4 right-4 z-30 flex items-center justify-center gap-2 pointer-events-none">
         <button
           type="button"
@@ -2948,7 +3021,6 @@ export default function App() {
         </button>
       </div>
 
-      {/* MOBILE SLIDE-UP FILTER DRAWER */}
       {isMobileFiltersOpen && (
         <div className="lg:hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex flex-col justify-end">
           <div className="bg-zinc-950 border-t border-zinc-800 rounded-t-3xl max-h-[85vh] flex flex-col">
@@ -2967,9 +3039,6 @@ export default function App() {
         </div>
       )}
 
-      {/* ==========================================
-          SLIDE-OUT SAVED MERCH & SIZE WATCHERS DRAWER
-      ========================================== */}
       {isWishlistOpen && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex justify-end">
           <div className="bg-zinc-950 border-l border-zinc-800 w-full max-w-md h-full flex flex-col shadow-2xl">
@@ -3022,7 +3091,6 @@ export default function App() {
             )}
 
             <div className="flex-1 overflow-y-auto p-4 space-y-5">
-              {/* Watched Out-of-Stock Sizes Section */}
               {watchedSizes.length > 0 && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
@@ -3080,7 +3148,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* Saved Wishlist Items Section */}
               <div className="space-y-2.5">
                 <h4 className="text-[11px] font-bold uppercase tracking-wider text-zinc-400">
                   Saved Items ({savedMerchItems.length})
@@ -3159,9 +3226,6 @@ export default function App() {
         </div>
       )}
 
-      {/* ==========================================
-          PRODUCT QUICK-VIEW MODAL (WITH SIZE WATCHERS)
-      ========================================== */}
       {quickViewItem && (
         <div
           onClick={() => setQuickViewItem(null)}
@@ -3314,147 +3378,187 @@ export default function App() {
         </div>
       )}
 
-      {/* ==========================================
-          MODAL: BAND LINKS EDITOR (SHARED VERIFIED OVERRIDES)
-      ========================================== */}
-      {editingArtist && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-2xl w-full max-h-[90vh] flex flex-col shadow-2xl">
-            <div className="flex items-center justify-between border-b border-zinc-800 p-5 shrink-0">
+      {showPlainTextDrawer && (
+        <div
+          onClick={() => setShowPlainTextDrawer(false)}
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-lg w-full p-5 space-y-4 shadow-2xl"
+          >
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
               <div>
-                <h3 className="text-sm font-bold text-white">
-                  Edit All Merch Site & Store Links — {editingArtist.name}
-                </h3>
+                <h3 className="text-sm font-bold text-white">Paste Plain-Text Band List</h3>
                 <p className="text-[11px] text-zinc-400 mt-0.5">
-                  Links that scrape valid products are automatically promoted as shared verified links for all visitors.
+                  Enter one band per line (or comma-separated). Great for festival lineups or Exportify CSV artist columns.
                 </p>
               </div>
               <button
-                onClick={() => setEditingArtist(null)}
-                className="text-zinc-400 hover:text-white p-1 rounded-lg cursor-pointer"
+                type="button"
+                onClick={() => setShowPlainTextDrawer(false)}
+                className="p-1.5 rounded-lg bg-zinc-800 text-zinc-400 hover:text-white cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            {unlockWarningField && (
-              <div className="mx-5 mt-4 p-3 rounded-xl bg-amber-500/15 border border-amber-500/40 space-y-2 shrink-0">
-                <div className="flex items-center gap-2 text-amber-300 text-xs font-bold">
-                  <ShieldAlert className="w-4 h-4 shrink-0" />
-                  <span>Warning: This URL previously found live products!</span>
+            <textarea
+              rows={8}
+              value={plainBandText}
+              onChange={(e) => setPlainBandText(e.target.value)}
+              placeholder={'Converge\nTurnstile\nDeftones\nKnocked Loose\nIDLES'}
+              className="w-full bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded-xl p-3 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none font-mono"
+            />
+
+            <div className="flex items-center justify-between gap-2 pt-1">
+              {spotifyArtists.length > 0 ? (
+                <div className="flex items-center bg-zinc-950 p-0.5 rounded-xl border border-zinc-800">
+                  <button
+                    type="button"
+                    onClick={() => setImportMode('REPLACE')}
+                    className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold cursor-pointer ${
+                      importMode === 'REPLACE' ? 'bg-zinc-800 text-white' : 'text-zinc-400'
+                    }`}
+                  >
+                    Replace Current
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setImportMode('MERGE')}
+                    className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold cursor-pointer ${
+                      importMode === 'MERGE' ? 'bg-emerald-500/20 text-emerald-300' : 'text-zinc-400'
+                    }`}
+                  >
+                    Merge With Current
+                  </button>
                 </div>
-                <p className="text-[11px] text-amber-200/90">
-                  Editing this link may change or replace the scraped feed for {editingArtist.name}. Unlock this field?
+              ) : (
+                <span className="text-[11px] text-zinc-500">
+                  {plainBandText.split(/\r?\n|,|;/).filter((s) => s.trim()).length} band(s) detected
+                </span>
+              )}
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowPlainTextDrawer(false)}
+                  className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-zinc-300 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={!plainBandText.trim()}
+                  onClick={() => importFromPlainTextList(plainBandText, importMode)}
+                  className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-xs font-bold text-zinc-950 cursor-pointer"
+                >
+                  {importMode === 'MERGE' && spotifyArtists.length > 0 ? 'Merge Bands' : 'Scan Band List'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editingArtist && (
+        <div
+          onClick={() => setEditingArtist(null)}
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-2xl w-full p-5 space-y-4 shadow-2xl max-h-[90vh] flex flex-col"
+          >
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3 shrink-0">
+              <div>
+                <h3 className="text-sm font-bold text-white">Edit Merch Site Links: {editingArtist.name}</h3>
+                <p className="text-[11px] text-zinc-400 mt-0.5">
+                  Verified URLs that return live products are automatically shared with future visitors.
                 </p>
-                <div className="flex gap-2 pt-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setUnlockedFields((prev) => ({ ...prev, [unlockWarningField]: true }));
-                      setUnlockWarningField(null);
-                    }}
-                    className="px-3 py-1 rounded-lg bg-amber-400 text-zinc-950 text-xs font-bold cursor-pointer"
-                  >
-                    Yes, Unlock Field
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setUnlockWarningField(null)}
-                    className="px-3 py-1 rounded-lg bg-zinc-800 text-zinc-300 text-xs font-semibold cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                </div>
               </div>
-            )}
+              <button
+                type="button"
+                onClick={() => setEditingArtist(null)}
+                className="p-1.5 rounded-lg bg-zinc-800 text-zinc-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
 
-            <form onSubmit={handleSaveBandLinks} className="flex-1 overflow-y-auto p-5 space-y-5">
-              <div className="space-y-3">
-                <h4 className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">
-                  Supported Retailers & Official Links (15 Platforms)
-                </h4>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  {ALL_EDITABLE_SITE_FIELDS.map((field) => {
-                    const bandProducts = liveShopifyFeeds[editingArtist.id] || [];
-                    const matchingCount =
-                      field.key === 'WEBSITE'
-                        ? bandProducts.length > 0 && linkForm.WEBSITE
-                          ? 1
-                          : 0
-                        : bandProducts.filter((p) => field.platformMatch.includes(p.sourcePlatform)).length;
-
-                    const hasProducts = matchingCount > 0;
-                    const isLocked = hasProducts && Boolean(linkForm[field.key]) && !unlockedFields[field.key];
-
-                    return (
-                      <div key={field.key} className="space-y-1 bg-zinc-950/60 p-2.5 rounded-xl border border-zinc-800/80">
-                        <div className="flex items-center justify-between gap-1">
-                          <label className="text-[11px] font-semibold text-zinc-300 truncate">{field.label}</label>
-                          {hasProducts && Boolean(linkForm[field.key]) && (
-                            <div className="flex items-center gap-1 shrink-0">
-                              <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-                                {field.key === 'WEBSITE' ? 'Verified' : `${matchingCount} Found`}
-                              </span>
-                              {isLocked && (
-                                <button
-                                  type="button"
-                                  onClick={() => setUnlockWarningField(field.key)}
-                                  className="text-[9px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-0.5 cursor-pointer"
-                                >
-                                  <Lock className="w-2.5 h-2.5" /> Unlock
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                        <input
-                          type="url"
-                          disabled={isLocked}
-                          value={linkForm[field.key] || ''}
-                          onChange={(e) => setLinkForm((prev) => ({ ...prev, [field.key]: e.target.value }))}
-                          placeholder={field.placeholder}
-                          className={`w-full bg-zinc-950 border rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none ${
-                            isLocked
-                              ? 'border-zinc-800/60 text-zinc-500 cursor-not-allowed'
-                              : 'border-zinc-800 focus:border-emerald-500'
-                          }`}
-                        />
-                      </div>
+            <form onSubmit={handleSaveBandLinks} className="space-y-4 overflow-y-auto pr-1 flex-1">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {ALL_EDITABLE_SITE_FIELDS.map((field) => {
+                  const hasExistingProducts =
+                    field.platformMatch.length > 0 &&
+                    (liveShopifyFeeds[editingArtist.id] || []).some((p) =>
+                      field.platformMatch.includes(p.sourcePlatform)
                     );
-                  })}
-                </div>
-              </div>
+                  const isLocked = hasExistingProducts && !unlockedFields[field.key];
 
-              <div className="space-y-3 pt-2 border-t border-zinc-800">
-                <h4 className="text-[11px] font-bold uppercase tracking-wider text-zinc-400">
-                  Regional Storefront Overrides
-                </h4>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  {[
-                    { key: 'ukStore', label: 'UK Regional Storefront URL', placeholder: 'https://ukstore.bandname.com' },
-                    { key: 'euStore', label: 'EU Regional Storefront URL', placeholder: 'https://eustore.bandname.com' },
-                    { key: 'usStore', label: 'US Regional Storefront URL', placeholder: 'https://usstore.bandname.com' },
-                    { key: 'auStore', label: 'AU Regional Storefront URL', placeholder: 'https://austore.bandname.com' }
-                  ].map((regField) => (
-                    <div key={regField.key} className="space-y-1">
-                      <label className="text-[11px] font-semibold text-zinc-300">{regField.label}</label>
+                  return (
+                    <div key={field.key} className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <label className="text-[11px] font-semibold text-zinc-300">{field.label}</label>
+                        {hasExistingProducts && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (isLocked) {
+                                setUnlockWarningField(field.key);
+                              } else {
+                                setUnlockedFields((prev) => ({ ...prev, [field.key]: false }));
+                              }
+                            }}
+                            className={`text-[10px] px-1.5 py-0.2 rounded flex items-center gap-1 cursor-pointer ${
+                              isLocked
+                                ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                                : 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                            }`}
+                          >
+                            <Lock className="w-2.5 h-2.5" />
+                            <span>{isLocked ? 'Locked (Has Products)' : 'Unlocked'}</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {unlockWarningField === field.key && isLocked && (
+                        <div className="p-2 rounded-lg bg-amber-500/15 border border-amber-500/40 text-[10px] text-amber-200 flex items-center justify-between gap-2">
+                          <span className="flex items-center gap-1">
+                            <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
+                            This site already has working products. Unlock anyway?
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setUnlockedFields((prev) => ({ ...prev, [field.key]: true }));
+                              setUnlockWarningField(null);
+                            }}
+                            className="px-2 py-0.5 rounded bg-amber-400 text-zinc-950 font-bold shrink-0 cursor-pointer"
+                          >
+                            Unlock
+                          </button>
+                        </div>
+                      )}
+
                       <input
                         type="url"
-                        value={linkForm[regField.key] || ''}
-                        onChange={(e) => setLinkForm((prev) => ({ ...prev, [regField.key]: e.target.value }))}
-                        placeholder={regField.placeholder}
-                        className="w-full bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none"
+                        disabled={isLocked}
+                        value={linkForm[field.key] || ''}
+                        onChange={(e) => setLinkForm((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                        placeholder={field.placeholder}
+                        className="w-full bg-zinc-950 disabled:opacity-50 border border-zinc-800 focus:border-emerald-500 rounded-xl px-3 py-1.5 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none"
                       />
                     </div>
-                  ))}
-                </div>
+                  );
+                })}
               </div>
 
-              <div className="flex justify-end gap-2 pt-3 border-t border-zinc-800 sticky bottom-0 bg-zinc-900 py-2">
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-zinc-800 shrink-0">
                 <button
                   type="button"
                   onClick={() => setEditingArtist(null)}
-                  className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-zinc-300 cursor-pointer"
+                  className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-zinc-300 cursor-pointer"
                 >
                   Cancel
                 </button>
@@ -3462,7 +3566,7 @@ export default function App() {
                   type="submit"
                   className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-xs font-bold text-zinc-950 cursor-pointer"
                 >
-                  Save & Re-Scrape All Sites
+                  Save & Re-Scrape Band
                 </button>
               </div>
             </form>

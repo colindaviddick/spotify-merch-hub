@@ -7,14 +7,25 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Load .env variables into process.env automatically (no extra packages needed)
+const envPath = path.join(__dirname, '.env');
+if (fs.existsSync(envPath)) {
+  for (const line of fs.readFileSync(envPath, 'utf-8').split(/\r?\n/)) {
+    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/i);
+    if (m && !process.env[m[1]]) {
+      process.env[m[1]] = m[2].replace(/^["']|["']$/g, '').trim();
+    }
+  }
+}
+
 const app = express();
-const PORT = Number(process.env.PORT) || 8080;
+const PORT = process.env.PORT || 3001;
 const CACHE_FILE = path.resolve('./merch-cache.json');
 
 app.use(cors());
 app.use(express.json());
 
-// Serve built Vite frontend in production (Render)
+// Serve built Vite frontend in production
 const distPath = path.join(__dirname, 'dist');
 if (fs.existsSync(distPath)) {
   app.use(express.static(distPath));
@@ -939,6 +950,129 @@ async function fetchKingsRoadAndBleepProducts(artistName, region = 'UK', overrid
 app.get('/api/rates', async (req, res) => {
   const rates = await refreshExchangeRates();
   return res.json(rates);
+});
+
+app.get('/api/lastfm', async (req, res) => {
+  const username = (req.query.username || '').trim();
+  const period = (req.query.period || 'overall').trim();
+  const limit = Math.min(250, Math.max(10, parseInt(req.query.limit, 10) || 100));
+
+  if (!username) {
+    return res.status(400).json({ error: 'Please enter a Last.fm username.' });
+  }
+
+  try {
+    // 1. Try Last.fm official API if LASTFM_API_KEY is configured in environment
+    const apiKey = process.env.LASTFM_API_KEY || '';
+    if (apiKey) {
+      const apiUrl = `https://ws.audioscrobbler.com/2.0/?method=user.gettopartists&user=${encodeURIComponent(
+        username
+      )}&period=${encodeURIComponent(period)}&limit=${limit}&api_key=${encodeURIComponent(apiKey)}&format=json`;
+      const apiRes = await fetchWithTimeout(apiUrl, { headers: { Accept: 'application/json' } }, 6000);
+      if (apiRes.ok) {
+        const apiData = await apiRes.json();
+        if (apiData.error) {
+          return res.status(404).json({ error: apiData.message || `Last.fm user "${username}" not found.` });
+        }
+        const topList = apiData?.topartists?.artist || [];
+        const artists = topList
+          .map((a) => ({
+            id: `lfm-${Buffer.from(String(a.name || '').toLowerCase()).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 18)}`,
+            name: String(a.name || '').trim(),
+            image: null,
+            genres: [],
+            spotifyUrl: `https://open.spotify.com/search/${encodeURIComponent(String(a.name || '').trim())}`,
+            followed: false,
+            likedTracksCount: Math.max(1, parseInt(a.playcount, 10) || 1)
+          }))
+          .filter((a) => a.name);
+        if (artists.length > 0) {
+          return res.json({ sourceName: `Last.fm: ${username}`, artists });
+        }
+      }
+    }
+
+    // 2. Zero-API-key fallback: try Last.fm public recenttracks RSS + library/artists HTML
+    const artistMap = new Map();
+    const addArtistToken = (rawName) => {
+      const clean = String(rawName || '').trim();
+      if (!clean || clean.startsWith('_') || clean.toLowerCase() === 'charts') return;
+      const key = clean.toLowerCase();
+      if (!artistMap.has(key) && artistMap.size < limit) {
+        artistMap.set(key, {
+          id: `lfm-${Buffer.from(key).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 18)}`,
+          name: clean,
+          image: null,
+          genres: [],
+          spotifyUrl: `https://open.spotify.com/search/${encodeURIComponent(clean)}`,
+          followed: false,
+          likedTracksCount: Math.max(1, 20 - Math.floor(artistMap.size / 5))
+        });
+      }
+    };
+
+    const pagesToFetch = limit > 100 ? [1, 2, 3] : limit > 50 ? [1, 2] : [1];
+    await Promise.all(
+      pagesToFetch.map(async (pageNum) => {
+        const pageUrl = `https://www.last.fm/user/${encodeURIComponent(
+          username
+        )}/library/artists?date_preset=${encodeURIComponent(
+          period === '7day'
+            ? 'LAST_7_DAYS'
+            : period === '1month'
+            ? 'LAST_30_DAYS'
+            : period === '6month'
+            ? 'LAST_180_DAYS'
+            : period === '12month'
+            ? 'LAST_365_DAYS'
+            : 'ALL'
+        )}&page=${pageNum}`;
+        try {
+          const htmlRes = await fetchWithTimeout(pageUrl, {}, 6500);
+          if (!htmlRes.ok) return;
+          const html = await htmlRes.text();
+
+          const linkRegex = /href="\/music\/([^"/?#]+)"/gi;
+          let m;
+          while ((m = linkRegex.exec(html)) !== null) {
+            try {
+              addArtistToken(decodeURIComponent(m[1].replace(/\+/g, ' ')));
+            } catch {}
+          }
+        } catch {}
+      })
+    );
+
+    // 3. Secondary fallback: Last.fm public recent tracks RSS feed (works even when library pages block bots)
+    if (artistMap.size === 0) {
+      try {
+        const rssRes = await fetchWithTimeout(
+          `https://ws.audioscrobbler.com/1.0/user/${encodeURIComponent(username)}/recenttracks.rss`,
+          {},
+          5500
+        );
+        if (rssRes.ok) {
+          const rssXml = await rssRes.text();
+          const titleRegex = /<title><!\[CDATA\[([\s\S]*?)\s+[–-]\s+[\s\S]*?\]\]><\/title>/gi;
+          let rm;
+          while ((rm = titleRegex.exec(rssXml)) !== null) {
+            addArtistToken(rm[1]);
+          }
+        }
+      } catch {}
+    }
+
+    const artists = Array.from(artistMap.values());
+    if (artists.length === 0) {
+      return res.status(404).json({
+        error: `Could not read public charts for "${username}" (Last.fm blocks scraper requests without an API key). Add LASTFM_API_KEY=your_key to your .env file (free at last.fm/api/account/create) and restart npm run dev.`
+      });
+    }
+
+    return res.json({ sourceName: `Last.fm: ${username}`, artists });
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to fetch Last.fm artists: ${err.message}` });
+  }
 });
 
 app.get('/api/playlist', async (req, res) => {
