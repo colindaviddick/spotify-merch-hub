@@ -19,7 +19,7 @@ if (fs.existsSync(envPath)) {
 }
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 8080;
 const CACHE_FILE = path.resolve('./merch-cache.json');
 
 app.use(cors());
@@ -29,6 +29,9 @@ app.use(express.json());
 const distPath = path.join(__dirname, 'dist');
 if (fs.existsSync(distPath)) {
   app.use(express.static(distPath));
+  app.use((req, res) => {
+    res.sendFile(path.join(distPath, 'index.html'));
+  });
 }
 
 // ==========================================
