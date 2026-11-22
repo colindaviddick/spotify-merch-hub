@@ -27,7 +27,7 @@ if (fs.existsSync(envPath)) {
 
 const app = express();
 // Local dev defaults to 3001 (matching vite.config.js proxy); Fly.io sets PORT=8080
-const PORT = Number(process.env.PORT) || 3001;
+const PORT = Number(process.env.PORT) || (process.env.FLY_APP_NAME ? 8080 : 3001);
 const CACHE_FILE = path.resolve('./merch-cache.json');
 
 app.use(cors());
